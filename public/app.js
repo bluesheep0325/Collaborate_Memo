@@ -30,6 +30,7 @@ const state = {
   titleBeforeEdit: "",
   localSequence: 0,
   reconnectTimer: null,
+  heartbeatTimer: null,
   reconnectAttempts: 0,
   joined: false
 };
@@ -159,6 +160,7 @@ function connect(roomId = state.roomId, userName = state.userName, password = st
 
   socket.addEventListener("close", () => {
     setStatus("offline");
+    stopHeartbeat();
     scheduleReconnect();
   });
 
@@ -181,6 +183,7 @@ function handleMessage(message) {
     state.users = new Map(message.room.users.map((user) => [user.id, user]));
     state.joined = true;
     state.reconnectAttempts = 0;
+    startHeartbeat();
     entryView.classList.add("hidden");
     memoView.classList.remove("hidden");
     roomLabel.textContent = state.roomId;
@@ -191,11 +194,16 @@ function handleMessage(message) {
 
   if (message.type === "join-error") {
     state.joined = false;
+    stopHeartbeat();
     state.socket?.close();
     entryView.classList.remove("hidden");
     memoView.classList.add("hidden");
-    entryError.textContent =
-      message.reason === "invalid-password" ? "合言葉が違います。" : "入室できませんでした。";
+    const errorLabels = {
+      "invalid-password": "合言葉が違います。",
+      "room-full": "このルームは満員です。",
+      "server-full": "作成できるルーム数の上限に達しています。"
+    };
+    entryError.textContent = errorLabels[message.reason] || "入室できませんでした。";
     setStatus("offline");
   }
 
@@ -419,6 +427,18 @@ function scheduleReconnect() {
   state.reconnectTimer = setTimeout(() => {
     connect();
   }, delay);
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  state.heartbeatTimer = setInterval(() => {
+    send({ type: "heartbeat" });
+  }, 30000);
+}
+
+function stopHeartbeat() {
+  clearInterval(state.heartbeatTimer);
+  state.heartbeatTimer = null;
 }
 
 function sendCursor() {

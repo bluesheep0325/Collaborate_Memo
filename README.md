@@ -18,19 +18,18 @@ For access from a different network, run this app behind a VPN, tunnel, reverse 
 
 ## Public Deploy
 
-This repository includes `render.yaml` for Render web services. Create a Render Blueprint from this repository, then set `ROOM_PASSWORD` as a secret environment variable before sharing the public URL.
+This repository includes `render.yaml` for Render free web services. Create a Render Blueprint from this repository, then set `ROOM_PASSWORD` as a secret environment variable before sharing the public URL.
 
 Recommended environment variables:
 
 ```text
 ROOM_PASSWORD=<shared room passphrase>
-MEMO_DATA_FILE=/var/data/rooms.json
 ALLOWED_ORIGINS=https://your-app.example.com
 ```
 
-`MEMO_DATA_FILE` controls where room data is saved. On platforms with ephemeral filesystems, configure a persistent disk and point this variable to a path on that disk.
-
 If `ROOM_PASSWORD` is empty, anyone who can access the URL can enter a room by guessing or knowing the room ID.
+
+Render free web services can spin down when idle and their filesystem is ephemeral. This app sends a heartbeat while users are connected, which helps keep the service awake during a meeting. Treat the server state as session data and export important pages with `TXT保存`.
 
 ## Options
 
@@ -41,6 +40,12 @@ $env:PORT=8080; npm start
 ```powershell
 $env:HOST='127.0.0.1'; npm start
 ```
+
+```powershell
+$env:MEMO_DATA_FILE='C:\memo-data\rooms.json'; npm start
+```
+
+`MEMO_DATA_FILE` is useful for local use or platforms with persistent storage. Render free instances do not provide persistent local storage.
 
 ## Test
 

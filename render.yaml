@@ -13,3 +13,5 @@ services:
         value: 0.0.0.0
       - key: ROOM_PASSWORD
         sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

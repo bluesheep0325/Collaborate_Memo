@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -12,6 +12,11 @@ const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
 const roomPassword = process.env.ROOM_PASSWORD || "";
 const dataFile = process.env.MEMO_DATA_FILE || join(root, "data", "rooms.json");
+const roomTtlMs = Number(process.env.ROOM_TTL_MS || 0);
+const maxRooms = Number(process.env.MAX_ROOMS || 100);
+const maxUsersPerRoom = Number(process.env.MAX_USERS_PER_ROOM || 10);
+const maxPagesPerRoom = Number(process.env.MAX_PAGES_PER_ROOM || 50);
+const maxPageChars = Number(process.env.MAX_PAGE_CHARS || 200000);
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -25,6 +30,13 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8"
+};
+
+const securityHeaders = {
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "no-referrer",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()"
 };
 
 const rooms = new Map();
@@ -43,6 +55,7 @@ function createPage(title = "Page 1") {
 
 function getRoom(roomId) {
   if (!rooms.has(roomId)) {
+    if (rooms.size >= maxRooms) return null;
     const firstPage = createPage("Page 1");
     rooms.set(roomId, {
       id: roomId,
@@ -101,6 +114,10 @@ function serializeRoom(room) {
   };
 }
 
+function withSecurityHeaders(headers = {}) {
+  return { ...securityHeaders, ...headers };
+}
+
 function serializeRoomForStorage(room) {
   return {
     id: room.id,
@@ -156,6 +173,14 @@ function isAllowedOrigin(request) {
   return Boolean(origin && allowedOrigins.includes(origin));
 }
 
+function passwordMatches(input) {
+  if (!roomPassword) return true;
+
+  const expected = Buffer.from(roomPassword);
+  const actual = Buffer.from(String(input || ""));
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
 function broadcast(room, message, exceptSocket = null) {
   const payload = JSON.stringify(message);
   for (const socket of sockets) {
@@ -169,8 +194,26 @@ function serveStatic(request, response) {
   const url = new URL(request.url, `http://${request.headers.host}`);
 
   if (url.pathname === "/healthz") {
-    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.writeHead(
+      200,
+      withSecurityHeaders({
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store"
+      })
+    );
     response.end(JSON.stringify({ ok: true, rooms: rooms.size, clients: sockets.size }));
+    return;
+  }
+
+  if (url.pathname === "/robots.txt") {
+    response.writeHead(
+      200,
+      withSecurityHeaders({
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store"
+      })
+    );
+    response.end("User-agent: *\nDisallow: /\n");
     return;
   }
 
@@ -178,15 +221,18 @@ function serveStatic(request, response) {
   const resolvedPath = normalize(join(publicDir, requestedPath));
 
   if (!resolvedPath.startsWith(publicDir) || !existsSync(resolvedPath)) {
-    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    response.writeHead(404, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
     response.end("Not found");
     return;
   }
 
-  response.writeHead(200, {
-    "content-type": mimeTypes[extname(resolvedPath)] || "application/octet-stream",
-    "cache-control": "no-store"
-  });
+  response.writeHead(
+    200,
+    withSecurityHeaders({
+      "content-type": mimeTypes[extname(resolvedPath)] || "application/octet-stream",
+      "cache-control": "no-store"
+    })
+  );
   createReadStream(resolvedPath).pipe(response);
 }
 
@@ -325,16 +371,29 @@ function handleMessage(socket, raw) {
   if (message.type === "add-page") handleAddPage(socket, room, message);
   if (message.type === "rename-page") handleRenamePage(socket, room, message);
   if (message.type === "switch-page") handleSwitchPage(socket, room, message);
+  if (message.type === "heartbeat") socket.send(JSON.stringify({ type: "heartbeat" }));
 }
 
 function joinRoom(socket, message) {
-  if (roomPassword && message.password !== roomPassword) {
+  if (!passwordMatches(message.password)) {
     socket.send(JSON.stringify({ type: "join-error", reason: "invalid-password" }));
+    setTimeout(() => socket.end(), 50);
     return;
   }
 
   const roomId = safeRoomId(message.roomId) || "default";
   const room = getRoom(roomId);
+  if (!room) {
+    socket.send(JSON.stringify({ type: "join-error", reason: "server-full" }));
+    setTimeout(() => socket.end(), 50);
+    return;
+  }
+  if (room.users.size >= maxUsersPerRoom) {
+    socket.send(JSON.stringify({ type: "join-error", reason: "room-full" }));
+    setTimeout(() => socket.end(), 50);
+    return;
+  }
+
   const colorIndex = room.users.size % colorPalette.length;
   const user = {
     id: socket.id,
@@ -368,6 +427,9 @@ function handlePageOp(socket, room, message) {
 
   op.start = clamp(op.start, 0, page.text.length);
   op.deleteCount = clamp(op.deleteCount, 0, page.text.length - op.start);
+  op.insert = op.insert.slice(0, Math.max(0, maxPageChars - (page.text.length - op.deleteCount)));
+  if (op.deleteCount === 0 && op.insert.length === 0) return;
+
   page.text = applyOp(page.text, op);
   page.version += 1;
   page.history.push({ version: page.version, op, userId: socket.id });
@@ -404,6 +466,8 @@ function handleCursor(socket, room, message) {
 }
 
 function handleAddPage(socket, room, message) {
+  if (room.pages.length >= maxPagesPerRoom) return;
+
   const page = createPage(String(message.title || `Page ${room.pages.length + 1}`).slice(0, 40));
   room.pages.push(page);
   room.activePageId = page.id;
@@ -439,11 +503,14 @@ function leave(socket) {
   room.users.delete(socket.id);
   broadcast(room, { type: "user-left", userId: socket.id });
 
-  if (room.users.size === 0) {
+  if (roomTtlMs > 0 && room.users.size === 0) {
     setTimeout(() => {
       const latest = rooms.get(room.id);
-      if (latest && latest.users.size === 0) rooms.delete(room.id);
-    }, 30 * 60 * 1000);
+      if (latest && latest.users.size === 0) {
+        rooms.delete(room.id);
+        scheduleSave();
+      }
+    }, roomTtlMs);
   }
 }
 
