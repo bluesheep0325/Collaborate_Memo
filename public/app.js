@@ -1,0 +1,493 @@
+const entryView = document.querySelector("#entryView");
+const memoView = document.querySelector("#memoView");
+const joinForm = document.querySelector("#joinForm");
+const roomInput = document.querySelector("#roomInput");
+const nameInput = document.querySelector("#nameInput");
+const roomLabel = document.querySelector("#roomLabel");
+const pageList = document.querySelector("#pageList");
+const addPageButton = document.querySelector("#addPageButton");
+const pageTitleInput = document.querySelector("#pageTitleInput");
+const editTitleButton = document.querySelector("#editTitleButton");
+const statusText = document.querySelector("#statusText");
+const userList = document.querySelector("#userList");
+const saveButton = document.querySelector("#saveButton");
+const memoInput = document.querySelector("#memoInput");
+const cursorLayer = document.querySelector("#cursorLayer");
+
+const state = {
+  socket: null,
+  selfId: "",
+  roomId: "",
+  userName: "",
+  activePageId: "",
+  pages: [],
+  users: new Map(),
+  lastValue: "",
+  titleTimer: null,
+  titleBeforeEdit: "",
+  localSequence: 0
+};
+
+const params = new URLSearchParams(location.search);
+roomInput.value = params.get("room") || localStorage.getItem("memo-room") || "";
+nameInput.value = localStorage.getItem("memo-name") || "";
+
+joinForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const roomId = roomInput.value.trim() || "default";
+  const userName = nameInput.value.trim() || "Guest";
+
+  localStorage.setItem("memo-room", roomId);
+  localStorage.setItem("memo-name", userName);
+  connect(roomId, userName);
+});
+
+addPageButton.addEventListener("click", () => {
+  send({ type: "add-page", title: `Page ${state.pages.length + 1}` });
+});
+
+editTitleButton.addEventListener("click", () => {
+  if (pageTitleInput.readOnly) {
+    beginTitleEdit();
+  } else {
+    commitTitleEdit();
+  }
+});
+
+editTitleButton.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+});
+
+pageTitleInput.addEventListener("input", () => {
+  const page = currentPage();
+  if (!page) return;
+  page.title = normalizeTitle(pageTitleInput.value, page.title);
+  renderPages();
+
+  clearTimeout(state.titleTimer);
+  state.titleTimer = setTimeout(() => {
+    send({ type: "rename-page", pageId: page.id, title: page.title });
+  }, 300);
+});
+
+pageTitleInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    commitTitleEdit();
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    cancelTitleEdit();
+  }
+});
+
+pageTitleInput.addEventListener("blur", () => {
+  if (!pageTitleInput.readOnly) commitTitleEdit();
+});
+
+memoInput.addEventListener("input", () => {
+  const page = currentPage();
+  if (!page) return;
+
+  const nextValue = memoInput.value;
+  const op = diffText(state.lastValue, nextValue);
+  if (!op) return;
+
+  page.text = nextValue;
+  state.lastValue = nextValue;
+  page.version += 1;
+  state.localSequence += 1;
+
+  send({
+    type: "page-op",
+    pageId: page.id,
+    op,
+    baseVersion: page.version - 1,
+    sequence: state.localSequence,
+    cursor: { index: memoInput.selectionStart }
+  });
+  sendCursor();
+});
+
+memoInput.addEventListener("keyup", sendCursor);
+memoInput.addEventListener("click", sendCursor);
+memoInput.addEventListener("select", sendCursor);
+memoInput.addEventListener("scroll", renderCursors);
+window.addEventListener("resize", renderCursors);
+
+saveButton.addEventListener("click", () => {
+  const page = currentPage();
+  if (!page) return;
+
+  const safeTitle = page.title.replace(/[\\/:*?"<>|]/g, "_") || "memo";
+  const blob = new Blob([page.text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${safeTitle}.txt`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+});
+
+function connect(roomId, userName) {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${protocol}//${location.host}`);
+
+  state.socket = socket;
+  state.roomId = roomId;
+  state.userName = userName;
+  setStatus("connecting");
+
+  socket.addEventListener("open", () => {
+    send({ type: "join", roomId, userName });
+  });
+
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(event.data);
+    handleMessage(message);
+  });
+
+  socket.addEventListener("close", () => {
+    setStatus("offline");
+  });
+
+  socket.addEventListener("error", () => {
+    setStatus("error");
+  });
+}
+
+function send(message) {
+  if (state.socket?.readyState === WebSocket.OPEN) {
+    state.socket.send(JSON.stringify(message));
+  }
+}
+
+function handleMessage(message) {
+  if (message.type === "joined") {
+    state.selfId = message.selfId;
+    state.activePageId = message.room.activePageId;
+    state.pages = message.room.pages;
+    state.users = new Map(message.room.users.map((user) => [user.id, user]));
+    entryView.classList.add("hidden");
+    memoView.classList.remove("hidden");
+    roomLabel.textContent = state.roomId;
+    setStatus("online");
+    switchPage(state.activePageId, false);
+    renderAll();
+  }
+
+  if (message.type === "user-joined") {
+    state.users.set(message.user.id, message.user);
+    renderUsers();
+  }
+
+  if (message.type === "user-left") {
+    state.users.delete(message.userId);
+    renderUsers();
+    renderCursors();
+  }
+
+  if (message.type === "page-op") {
+    receivePageOp(message);
+  }
+
+  if (message.type === "cursor") {
+    const user = state.users.get(message.userId);
+    if (user) {
+      user.cursor = message.cursor;
+      user.activePageId = message.cursor.pageId;
+      renderCursors();
+    }
+  }
+
+  if (message.type === "page-added") {
+    state.pages.push(message.page);
+    state.activePageId = message.page.id;
+    switchPage(message.page.id, false);
+    renderAll();
+  }
+
+  if (message.type === "page-renamed") {
+    const page = state.pages.find((item) => item.id === message.pageId);
+    if (page) {
+      page.title = message.title;
+      const editingThisTitle = page.id === state.activePageId && !pageTitleInput.readOnly;
+      if (page.id === state.activePageId && !editingThisTitle) {
+        pageTitleInput.value = page.title;
+      }
+      renderPages();
+    }
+  }
+}
+
+function receivePageOp(message) {
+  const page = state.pages.find((item) => item.id === message.pageId);
+  if (!page || message.userId === state.selfId) {
+    if (page) page.version = Math.max(page.version, message.version);
+    return;
+  }
+
+  page.text = applyOp(page.text, message.op);
+  page.version = Math.max(page.version, message.version);
+
+  const user = state.users.get(message.userId);
+  if (user && message.cursor) user.cursor = message.cursor;
+
+  if (page.id === state.activePageId) {
+    const selectionStart = transformPosition(memoInput.selectionStart, message.op);
+    const selectionEnd = transformPosition(memoInput.selectionEnd, message.op);
+    memoInput.value = page.text;
+    state.lastValue = page.text;
+    memoInput.setSelectionRange(selectionStart, selectionEnd);
+    renderCursors();
+  }
+}
+
+function renderAll() {
+  renderPages();
+  renderUsers();
+  renderCursors();
+}
+
+function renderPages() {
+  pageList.replaceChildren(
+    ...state.pages.map((page) => {
+      const button = document.createElement("button");
+      button.className = `page-item${page.id === state.activePageId ? " active" : ""}`;
+      button.type = "button";
+      button.textContent = page.title || "Untitled";
+      button.addEventListener("click", () => switchPage(page.id, true));
+      return button;
+    })
+  );
+}
+
+function renderUsers() {
+  const users = [...state.users.values()];
+  userList.replaceChildren(
+    ...users.map((user) => {
+      const pill = document.createElement("span");
+      pill.className = "user-pill";
+      pill.style.setProperty("--user-color", user.color);
+      pill.title = user.name;
+
+      const dot = document.createElement("span");
+      dot.className = "user-dot";
+      const name = document.createElement("span");
+      name.className = "user-name";
+      name.textContent = user.id === state.selfId ? `${user.name} (自分)` : user.name;
+
+      pill.append(dot, name);
+      return pill;
+    })
+  );
+}
+
+function renderCursors() {
+  const page = currentPage();
+  if (!page) return;
+
+  const cursors = [...state.users.values()].filter(
+    (user) => user.id !== state.selfId && user.cursor?.pageId === state.activePageId
+  );
+
+  cursorLayer.replaceChildren(
+    ...cursors.map((user) => {
+      const point = caretPoint(memoInput, user.cursor.index);
+      const cursor = document.createElement("div");
+      cursor.className = "remote-cursor";
+      cursor.style.left = `${point.left}px`;
+      cursor.style.top = `${point.top}px`;
+      cursor.style.setProperty("--cursor-color", user.color);
+
+      const label = document.createElement("span");
+      label.textContent = user.name;
+      cursor.append(label);
+      return cursor;
+    })
+  );
+}
+
+function switchPage(pageId, notify) {
+  const page = state.pages.find((item) => item.id === pageId);
+  if (!page) return;
+
+  clearTimeout(state.titleTimer);
+  state.activePageId = page.id;
+  pageTitleInput.value = page.title;
+  endTitleEditMode();
+  memoInput.value = page.text;
+  state.lastValue = page.text;
+  renderAll();
+  memoInput.focus();
+
+  if (notify) {
+    send({ type: "switch-page", pageId });
+    sendCursor();
+  }
+}
+
+function currentPage() {
+  return state.pages.find((page) => page.id === state.activePageId);
+}
+
+function beginTitleEdit() {
+  const page = currentPage();
+  if (!page) return;
+
+  state.titleBeforeEdit = page.title;
+  pageTitleInput.readOnly = false;
+  editTitleButton.textContent = "完了";
+  pageTitleInput.focus();
+  pageTitleInput.select();
+}
+
+function commitTitleEdit() {
+  const page = currentPage();
+  if (!page) return;
+
+  clearTimeout(state.titleTimer);
+  page.title = normalizeTitle(pageTitleInput.value, state.titleBeforeEdit || page.title);
+  pageTitleInput.value = page.title;
+  send({ type: "rename-page", pageId: page.id, title: page.title });
+  renderPages();
+  endTitleEditMode();
+}
+
+function cancelTitleEdit() {
+  const page = currentPage();
+  if (!page) return;
+
+  clearTimeout(state.titleTimer);
+  page.title = state.titleBeforeEdit || page.title;
+  pageTitleInput.value = page.title;
+  renderPages();
+  endTitleEditMode();
+}
+
+function endTitleEditMode() {
+  pageTitleInput.readOnly = true;
+  editTitleButton.textContent = "編集";
+  state.titleBeforeEdit = "";
+}
+
+function normalizeTitle(title, fallback) {
+  const normalized = title.trim().slice(0, 40);
+  return normalized || fallback || "Untitled";
+}
+
+function setStatus(status) {
+  const labels = {
+    connecting: "接続状態: 接続中",
+    online: "接続状態: 同期中",
+    offline: "接続状態: オフライン",
+    error: "接続状態: 接続エラー"
+  };
+
+  statusText.textContent = labels[status] || labels.offline;
+  statusText.className = `status is-${status}`;
+}
+
+function sendCursor() {
+  const page = currentPage();
+  if (!page) return;
+  send({ type: "cursor", pageId: page.id, index: memoInput.selectionStart });
+  const user = state.users.get(state.selfId);
+  if (user) {
+    user.cursor = { pageId: page.id, index: memoInput.selectionStart };
+    user.activePageId = page.id;
+  }
+}
+
+function diffText(before, after) {
+  if (before === after) return null;
+
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) {
+    start += 1;
+  }
+
+  let beforeEnd = before.length;
+  let afterEnd = after.length;
+  while (beforeEnd > start && afterEnd > start && before[beforeEnd - 1] === after[afterEnd - 1]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+
+  return {
+    start,
+    deleteCount: beforeEnd - start,
+    insert: after.slice(start, afterEnd)
+  };
+}
+
+function applyOp(text, op) {
+  return text.slice(0, op.start) + op.insert + text.slice(op.start + op.deleteCount);
+}
+
+function transformPosition(position, op) {
+  const start = op.start;
+  const end = op.start + op.deleteCount;
+
+  if (position < start) return position;
+  if (position > end) return position + op.insert.length - op.deleteCount;
+  return start + op.insert.length;
+}
+
+function caretPoint(textarea, position) {
+  const style = getComputedStyle(textarea);
+  const mirror = document.createElement("div");
+  const span = document.createElement("span");
+  const properties = [
+    "boxSizing",
+    "width",
+    "height",
+    "borderTopWidth",
+    "borderRightWidth",
+    "borderBottomWidth",
+    "borderLeftWidth",
+    "paddingTop",
+    "paddingRight",
+    "paddingBottom",
+    "paddingLeft",
+    "fontFamily",
+    "fontSize",
+    "fontWeight",
+    "letterSpacing",
+    "lineHeight",
+    "textTransform",
+    "textAlign",
+    "whiteSpace",
+    "wordBreak",
+    "overflowWrap"
+  ];
+
+  mirror.style.position = "absolute";
+  mirror.style.visibility = "hidden";
+  mirror.style.top = "0";
+  mirror.style.left = "-9999px";
+  mirror.style.whiteSpace = "pre-wrap";
+  mirror.style.overflowWrap = "break-word";
+  mirror.style.overflow = "hidden";
+
+  for (const property of properties) {
+    mirror.style[property] = style[property];
+  }
+
+  mirror.textContent = textarea.value.slice(0, position);
+  span.textContent = textarea.value.slice(position, position + 1) || ".";
+  mirror.append(span);
+  document.body.append(mirror);
+
+  const textareaRect = textarea.getBoundingClientRect();
+  const mirrorRect = mirror.getBoundingClientRect();
+  const spanRect = span.getBoundingClientRect();
+  const left = spanRect.left - mirrorRect.left + textarea.offsetLeft - textarea.scrollLeft;
+  const top = spanRect.top - mirrorRect.top + textarea.offsetTop - textarea.scrollTop;
+  mirror.remove();
+
+  return {
+    left: Math.min(Math.max(left, 0), textareaRect.width - 20),
+    top: Math.min(Math.max(top, 0), textareaRect.height - 20)
+  };
+}

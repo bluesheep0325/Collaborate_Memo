@@ -1,0 +1,14 @@
+{
+  "name": "collaborate-memo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser-based realtime collaborative memo app.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node scripts/smoke-test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

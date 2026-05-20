@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Collaborate Memo</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="entry-view" id="entryView" aria-labelledby="entryTitle">
+        <div class="entry-panel">
+          <p class="eyebrow">Realtime Memo</p>
+          <h1 id="entryTitle">Collaborate Memo</h1>
+          <form id="joinForm" class="join-form">
+            <label>
+              <span>ルームID</span>
+              <input id="roomInput" name="room" autocomplete="off" maxlength="40" required placeholder="project-note" />
+            </label>
+            <label>
+              <span>ユーザー名</span>
+              <input id="nameInput" name="name" autocomplete="off" maxlength="24" required placeholder="Akira" />
+            </label>
+            <button type="submit">入室</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="memo-view hidden" id="memoView" aria-label="メモ画面">
+        <aside class="sidebar">
+          <div class="room-block">
+            <span class="muted">Room</span>
+            <strong id="roomLabel"></strong>
+          </div>
+          <div class="side-head">
+            <span>Pages</span>
+            <button id="addPageButton" class="icon-button" title="ページを追加" aria-label="ページを追加">+</button>
+          </div>
+          <nav id="pageList" class="page-list" aria-label="ページ一覧"></nav>
+        </aside>
+
+        <section class="workspace">
+          <header class="toolbar">
+            <div class="title-wrap">
+              <div class="title-row">
+                <input id="pageTitleInput" class="page-title" aria-label="ページ名" maxlength="40" readonly />
+                <button id="editTitleButton" class="title-edit-button" type="button">編集</button>
+              </div>
+              <span id="statusText" class="status is-connecting">接続状態: 接続中</span>
+            </div>
+            <div class="toolbar-actions">
+              <div id="userList" class="user-list" aria-label="参加ユーザー"></div>
+              <button id="saveButton" class="secondary-button">TXT保存</button>
+            </div>
+          </header>
+
+          <div class="editor-frame">
+            <textarea
+              id="memoInput"
+              spellcheck="false"
+              autocomplete="off"
+              autocapitalize="off"
+              aria-label="共同編集メモ"
+              placeholder="ここにメモを書きます"
+            ></textarea>
+            <div id="cursorLayer" class="cursor-layer" aria-hidden="true"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

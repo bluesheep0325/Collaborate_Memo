@@ -1,0 +1,372 @@
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, existsSync } from "node:fs";
+import { createServer } from "node:http";
+import { networkInterfaces } from "node:os";
+import { extname, join, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL(".", import.meta.url));
+const publicDir = join(root, "public");
+const port = Number(process.env.PORT || 3000);
+const host = process.env.HOST || "0.0.0.0";
+
+const mimeTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8"
+};
+
+const rooms = new Map();
+const sockets = new Set();
+const colorPalette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
+
+function createPage(title = "Page 1") {
+  return {
+    id: randomUUID(),
+    title,
+    text: "",
+    version: 0,
+    history: []
+  };
+}
+
+function getRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    const firstPage = createPage("Page 1");
+    rooms.set(roomId, {
+      id: roomId,
+      pages: [firstPage],
+      activePageId: firstPage.id,
+      users: new Map()
+    });
+  }
+  return rooms.get(roomId);
+}
+
+function safeRoomId(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^\p{L}\p{N}_-]/gu, "")
+    .slice(0, 40);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function applyOp(text, op) {
+  const start = clamp(op.start, 0, text.length);
+  const deleteCount = clamp(op.deleteCount, 0, text.length - start);
+  return text.slice(0, start) + op.insert + text.slice(start + deleteCount);
+}
+
+function transformPosition(position, op, preferAfterInsert = true) {
+  const start = op.start;
+  const end = op.start + op.deleteCount;
+
+  if (position < start) return position;
+  if (position > end) return position + op.insert.length - op.deleteCount;
+  return start + (preferAfterInsert ? op.insert.length : 0);
+}
+
+function transformOp(incoming, applied) {
+  const start = transformPosition(incoming.start, applied, incoming.insert.length > 0);
+  const end = transformPosition(incoming.start + incoming.deleteCount, applied, false);
+
+  return {
+    start: Math.max(0, start),
+    deleteCount: Math.max(0, end - start),
+    insert: incoming.insert
+  };
+}
+
+function serializeRoom(room) {
+  return {
+    id: room.id,
+    activePageId: room.activePageId,
+    pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version })),
+    users: [...room.users.values()]
+  };
+}
+
+function broadcast(room, message, exceptSocket = null) {
+  const payload = JSON.stringify(message);
+  for (const socket of sockets) {
+    if (socket !== exceptSocket && socket.roomId === room.id && socket.wsReadyState === "open") {
+      socket.send(payload);
+    }
+  }
+}
+
+function serveStatic(request, response) {
+  const url = new URL(request.url, `http://${request.headers.host}`);
+  const requestedPath = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
+  const resolvedPath = normalize(join(publicDir, requestedPath));
+
+  if (!resolvedPath.startsWith(publicDir) || !existsSync(resolvedPath)) {
+    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    response.end("Not found");
+    return;
+  }
+
+  response.writeHead(200, {
+    "content-type": mimeTypes[extname(resolvedPath)] || "application/octet-stream",
+    "cache-control": "no-store"
+  });
+  createReadStream(resolvedPath).pipe(response);
+}
+
+const server = createServer(serveStatic);
+
+server.on("upgrade", (request, socket) => {
+  if (request.headers.upgrade?.toLowerCase() !== "websocket") {
+    socket.destroy();
+    return;
+  }
+
+  const key = request.headers["sec-websocket-key"];
+  const acceptKey = createHash("sha1")
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${acceptKey}\r\n\r\n`
+  );
+
+  socket.id = randomUUID();
+  socket.wsReadyState = "open";
+  socket.buffer = Buffer.alloc(0);
+  socket.send = (message) => writeFrame(socket, message);
+  sockets.add(socket);
+
+  socket.on("data", (chunk) => readFrames(socket, chunk));
+  socket.on("close", () => leave(socket));
+  socket.on("error", () => leave(socket));
+});
+
+function readFrames(socket, chunk) {
+  socket.buffer = Buffer.concat([socket.buffer, chunk]);
+
+  while (socket.buffer.length >= 2) {
+    const first = socket.buffer[0];
+    const second = socket.buffer[1];
+    const opcode = first & 0x0f;
+    const masked = (second & 0x80) === 0x80;
+    let length = second & 0x7f;
+    let offset = 2;
+
+    if (length === 126) {
+      if (socket.buffer.length < offset + 2) return;
+      length = socket.buffer.readUInt16BE(offset);
+      offset += 2;
+    } else if (length === 127) {
+      if (socket.buffer.length < offset + 8) return;
+      length = Number(socket.buffer.readBigUInt64BE(offset));
+      offset += 8;
+    }
+
+    const maskOffset = masked ? 4 : 0;
+    if (socket.buffer.length < offset + maskOffset + length) return;
+
+    let payload = socket.buffer.subarray(offset + maskOffset, offset + maskOffset + length);
+    if (masked) {
+      const mask = socket.buffer.subarray(offset, offset + 4);
+      payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+    }
+
+    socket.buffer = socket.buffer.subarray(offset + maskOffset + length);
+
+    if (opcode === 0x8) {
+      socket.end();
+      leave(socket);
+      return;
+    }
+    if (opcode === 0x9) {
+      writeFrame(socket, payload, 0x0a);
+      continue;
+    }
+    if (opcode === 0x1) {
+      handleMessage(socket, payload.toString("utf8"));
+    }
+  }
+}
+
+function writeFrame(socket, payload, opcode = 0x1) {
+  if (socket.destroyed) return;
+  const data = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload));
+  let header;
+
+  if (data.length < 126) {
+    header = Buffer.from([0x80 | opcode, data.length]);
+  } else if (data.length < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(data.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x80 | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(data.length), 2);
+  }
+
+  socket.write(Buffer.concat([header, data]));
+}
+
+function handleMessage(socket, raw) {
+  let message;
+  try {
+    message = JSON.parse(raw);
+  } catch {
+    if (process.env.DEBUG_WS) console.error("Invalid websocket payload:", raw);
+    return;
+  }
+
+  if (process.env.DEBUG_WS) console.error("Websocket message:", message.type);
+
+  if (message.type === "join") {
+    joinRoom(socket, message);
+    return;
+  }
+
+  if (!socket.roomId) return;
+  const room = rooms.get(socket.roomId);
+  if (!room) return;
+
+  if (message.type === "page-op") handlePageOp(socket, room, message);
+  if (message.type === "cursor") handleCursor(socket, room, message);
+  if (message.type === "add-page") handleAddPage(socket, room, message);
+  if (message.type === "rename-page") handleRenamePage(socket, room, message);
+  if (message.type === "switch-page") handleSwitchPage(socket, room, message);
+}
+
+function joinRoom(socket, message) {
+  const roomId = safeRoomId(message.roomId) || "default";
+  const room = getRoom(roomId);
+  const colorIndex = room.users.size % colorPalette.length;
+  const user = {
+    id: socket.id,
+    name: String(message.userName || "Guest").trim().slice(0, 24) || "Guest",
+    color: colorPalette[colorIndex],
+    cursor: { pageId: room.activePageId, index: 0 },
+    activePageId: room.activePageId
+  };
+
+  socket.roomId = roomId;
+  room.users.set(socket.id, user);
+  socket.send(JSON.stringify({ type: "joined", selfId: socket.id, room: serializeRoom(room) }));
+  broadcast(room, { type: "user-joined", user }, socket);
+}
+
+function handlePageOp(socket, room, message) {
+  const page = room.pages.find((item) => item.id === message.pageId);
+  if (!page || typeof message.op?.insert !== "string") return;
+
+  let op = {
+    start: Number(message.op.start) || 0,
+    deleteCount: Number(message.op.deleteCount) || 0,
+    insert: message.op.insert.slice(0, 50000)
+  };
+
+  const baseVersion = Number(message.baseVersion) || 0;
+  const missedOps = page.history.filter((item) => item.version > baseVersion);
+  for (const historyItem of missedOps) {
+    op = transformOp(op, historyItem.op);
+  }
+
+  op.start = clamp(op.start, 0, page.text.length);
+  op.deleteCount = clamp(op.deleteCount, 0, page.text.length - op.start);
+  page.text = applyOp(page.text, op);
+  page.version += 1;
+  page.history.push({ version: page.version, op, userId: socket.id });
+  page.history = page.history.slice(-200);
+
+  const user = room.users.get(socket.id);
+  if (user && message.cursor) {
+    user.cursor = { pageId: page.id, index: clamp(Number(message.cursor.index) || 0, 0, page.text.length) };
+    user.activePageId = page.id;
+  }
+
+  broadcast(room, {
+    type: "page-op",
+    pageId: page.id,
+    op,
+    version: page.version,
+    userId: socket.id,
+    cursor: user?.cursor
+  });
+}
+
+function handleCursor(socket, room, message) {
+  const user = room.users.get(socket.id);
+  const page = room.pages.find((item) => item.id === message.pageId);
+  if (!user || !page) return;
+
+  user.cursor = {
+    pageId: page.id,
+    index: clamp(Number(message.index) || 0, 0, page.text.length)
+  };
+  user.activePageId = page.id;
+  broadcast(room, { type: "cursor", userId: socket.id, cursor: user.cursor }, socket);
+}
+
+function handleAddPage(socket, room, message) {
+  const page = createPage(String(message.title || `Page ${room.pages.length + 1}`).slice(0, 40));
+  room.pages.push(page);
+  room.activePageId = page.id;
+  broadcast(room, { type: "page-added", page: { id: page.id, title: page.title, text: "", version: 0 } });
+}
+
+function handleRenamePage(socket, room, message) {
+  const page = room.pages.find((item) => item.id === message.pageId);
+  if (!page) return;
+  page.title = String(message.title || page.title).trim().slice(0, 40) || page.title;
+  broadcast(room, { type: "page-renamed", pageId: page.id, title: page.title });
+}
+
+function handleSwitchPage(socket, room, message) {
+  const user = room.users.get(socket.id);
+  const page = room.pages.find((item) => item.id === message.pageId);
+  if (!user || !page) return;
+  user.activePageId = page.id;
+  user.cursor = { pageId: page.id, index: 0 };
+  broadcast(room, { type: "cursor", userId: socket.id, cursor: user.cursor }, socket);
+}
+
+function leave(socket) {
+  if (socket.wsReadyState === "closed") return;
+  socket.wsReadyState = "closed";
+  sockets.delete(socket);
+
+  if (!socket.roomId) return;
+  const room = rooms.get(socket.roomId);
+  if (!room) return;
+  room.users.delete(socket.id);
+  broadcast(room, { type: "user-left", userId: socket.id });
+
+  if (room.users.size === 0) {
+    setTimeout(() => {
+      const latest = rooms.get(room.id);
+      if (latest && latest.users.size === 0) rooms.delete(room.id);
+    }, 30 * 60 * 1000);
+  }
+}
+
+server.listen(port, host, () => {
+  console.log(`Collaborate Memo is running at http://localhost:${port}`);
+  for (const address of getLanAddresses()) {
+    console.log(`LAN access: http://${address}:${port}`);
+  }
+});
+
+function getLanAddresses() {
+  return Object.values(networkInterfaces())
+    .flat()
+    .filter((item) => item && item.family === "IPv4" && !item.internal)
+    .map((item) => item.address);
+}
