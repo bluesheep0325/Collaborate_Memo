@@ -508,6 +508,7 @@ function caretPoint(textarea, position) {
     "fontWeight",
     "letterSpacing",
     "lineHeight",
+    "tabSize",
     "textTransform",
     "textAlign",
     "whiteSpace",
@@ -528,7 +529,7 @@ function caretPoint(textarea, position) {
   }
 
   mirror.textContent = textarea.value.slice(0, position);
-  span.textContent = textarea.value.slice(position, position + 1) || ".";
+  span.textContent = "\u200b";
   mirror.append(span);
   document.body.append(mirror);
 
@@ -541,6 +542,6 @@ function caretPoint(textarea, position) {
 
   return {
     left: Math.min(Math.max(left, 0), textareaRect.width - 20),
-    top: Math.min(Math.max(top, 0), textareaRect.height - 20)
+    top: Math.min(Math.max(top, 0), textareaRect.height - parseFloat(style.lineHeight))
   };
 }

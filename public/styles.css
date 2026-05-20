@@ -384,7 +384,6 @@ textarea:focus {
   width: 2px;
   height: 1.65em;
   background: var(--cursor-color);
-  transform: translateY(28px);
 }
 
 .remote-cursor span {
