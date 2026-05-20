@@ -1,14 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
-import { extname, join, normalize } from "node:path";
+import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = join(root, "public");
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
+const roomPassword = process.env.ROOM_PASSWORD || "";
+const dataFile = process.env.MEMO_DATA_FILE || join(root, "data", "rooms.json");
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const maxFrameBytes = 128 * 1024;
+let saveTimer = null;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -41,6 +50,7 @@ function getRoom(roomId) {
       activePageId: firstPage.id,
       users: new Map()
     });
+    scheduleSave();
   }
   return rooms.get(roomId);
 }
@@ -91,6 +101,61 @@ function serializeRoom(room) {
   };
 }
 
+function serializeRoomForStorage(room) {
+  return {
+    id: room.id,
+    activePageId: room.activePageId,
+    pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version }))
+  };
+}
+
+async function loadRooms() {
+  try {
+    const saved = JSON.parse(await readFile(dataFile, "utf8"));
+    for (const roomData of saved.rooms || []) {
+      const pages = Array.isArray(roomData.pages) && roomData.pages.length > 0 ? roomData.pages : [createPage("Page 1")];
+      for (const page of pages) {
+        page.history = [];
+        page.version = Number(page.version) || 0;
+        page.text = String(page.text || "");
+        page.title = String(page.title || "Untitled");
+      }
+      rooms.set(roomData.id, {
+        id: roomData.id,
+        pages,
+        activePageId: roomData.activePageId || pages[0].id,
+        users: new Map()
+      });
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error(`Failed to load memo data: ${error.message}`);
+    }
+  }
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveRooms().catch((error) => console.error(`Failed to save memo data: ${error.message}`));
+  }, 250);
+}
+
+async function saveRooms() {
+  const payload = {
+    savedAt: new Date().toISOString(),
+    rooms: [...rooms.values()].map(serializeRoomForStorage)
+  };
+  await mkdir(dirname(dataFile), { recursive: true });
+  await writeFile(dataFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+function isAllowedOrigin(request) {
+  if (allowedOrigins.length === 0) return true;
+  const origin = request.headers.origin;
+  return Boolean(origin && allowedOrigins.includes(origin));
+}
+
 function broadcast(room, message, exceptSocket = null) {
   const payload = JSON.stringify(message);
   for (const socket of sockets) {
@@ -102,6 +167,13 @@ function broadcast(room, message, exceptSocket = null) {
 
 function serveStatic(request, response) {
   const url = new URL(request.url, `http://${request.headers.host}`);
+
+  if (url.pathname === "/healthz") {
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({ ok: true, rooms: rooms.size, clients: sockets.size }));
+    return;
+  }
+
   const requestedPath = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
   const resolvedPath = normalize(join(publicDir, requestedPath));
 
@@ -122,6 +194,11 @@ const server = createServer(serveStatic);
 
 server.on("upgrade", (request, socket) => {
   if (request.headers.upgrade?.toLowerCase() !== "websocket") {
+    socket.destroy();
+    return;
+  }
+  if (!isAllowedOrigin(request)) {
+    socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
     socket.destroy();
     return;
   }
@@ -151,6 +228,11 @@ server.on("upgrade", (request, socket) => {
 
 function readFrames(socket, chunk) {
   socket.buffer = Buffer.concat([socket.buffer, chunk]);
+  if (socket.buffer.length > maxFrameBytes) {
+    socket.end();
+    leave(socket);
+    return;
+  }
 
   while (socket.buffer.length >= 2) {
     const first = socket.buffer[0];
@@ -246,6 +328,11 @@ function handleMessage(socket, raw) {
 }
 
 function joinRoom(socket, message) {
+  if (roomPassword && message.password !== roomPassword) {
+    socket.send(JSON.stringify({ type: "join-error", reason: "invalid-password" }));
+    return;
+  }
+
   const roomId = safeRoomId(message.roomId) || "default";
   const room = getRoom(roomId);
   const colorIndex = room.users.size % colorPalette.length;
@@ -285,6 +372,7 @@ function handlePageOp(socket, room, message) {
   page.version += 1;
   page.history.push({ version: page.version, op, userId: socket.id });
   page.history = page.history.slice(-200);
+  scheduleSave();
 
   const user = room.users.get(socket.id);
   if (user && message.cursor) {
@@ -319,6 +407,7 @@ function handleAddPage(socket, room, message) {
   const page = createPage(String(message.title || `Page ${room.pages.length + 1}`).slice(0, 40));
   room.pages.push(page);
   room.activePageId = page.id;
+  scheduleSave();
   broadcast(room, { type: "page-added", page: { id: page.id, title: page.title, text: "", version: 0 } });
 }
 
@@ -326,6 +415,7 @@ function handleRenamePage(socket, room, message) {
   const page = room.pages.find((item) => item.id === message.pageId);
   if (!page) return;
   page.title = String(message.title || page.title).trim().slice(0, 40) || page.title;
+  scheduleSave();
   broadcast(room, { type: "page-renamed", pageId: page.id, title: page.title });
 }
 
@@ -357,12 +447,24 @@ function leave(socket) {
   }
 }
 
+await loadRooms();
+
 server.listen(port, host, () => {
   console.log(`Collaborate Memo is running at http://localhost:${port}`);
   for (const address of getLanAddresses()) {
     console.log(`LAN access: http://${address}:${port}`);
   }
 });
+
+async function shutdown() {
+  clearTimeout(saveTimer);
+  await saveRooms();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 function getLanAddresses() {
   return Object.values(networkInterfaces())

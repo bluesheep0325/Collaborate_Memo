@@ -3,6 +3,8 @@ const memoView = document.querySelector("#memoView");
 const joinForm = document.querySelector("#joinForm");
 const roomInput = document.querySelector("#roomInput");
 const nameInput = document.querySelector("#nameInput");
+const passwordInput = document.querySelector("#passwordInput");
+const entryError = document.querySelector("#entryError");
 const roomLabel = document.querySelector("#roomLabel");
 const pageList = document.querySelector("#pageList");
 const addPageButton = document.querySelector("#addPageButton");
@@ -19,13 +21,17 @@ const state = {
   selfId: "",
   roomId: "",
   userName: "",
+  password: "",
   activePageId: "",
   pages: [],
   users: new Map(),
   lastValue: "",
   titleTimer: null,
   titleBeforeEdit: "",
-  localSequence: 0
+  localSequence: 0,
+  reconnectTimer: null,
+  reconnectAttempts: 0,
+  joined: false
 };
 
 const params = new URLSearchParams(location.search);
@@ -36,10 +42,12 @@ joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const roomId = roomInput.value.trim() || "default";
   const userName = nameInput.value.trim() || "Guest";
+  const password = passwordInput.value;
 
+  entryError.textContent = "";
   localStorage.setItem("memo-room", roomId);
   localStorage.setItem("memo-name", userName);
-  connect(roomId, userName);
+  connect(roomId, userName, password);
 });
 
 addPageButton.addEventListener("click", () => {
@@ -129,17 +137,19 @@ saveButton.addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
-function connect(roomId, userName) {
+function connect(roomId = state.roomId, userName = state.userName, password = state.password) {
+  clearTimeout(state.reconnectTimer);
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${location.host}`);
 
   state.socket = socket;
   state.roomId = roomId;
   state.userName = userName;
+  state.password = password;
   setStatus("connecting");
 
   socket.addEventListener("open", () => {
-    send({ type: "join", roomId, userName });
+    send({ type: "join", roomId, userName, password });
   });
 
   socket.addEventListener("message", (event) => {
@@ -149,6 +159,7 @@ function connect(roomId, userName) {
 
   socket.addEventListener("close", () => {
     setStatus("offline");
+    scheduleReconnect();
   });
 
   socket.addEventListener("error", () => {
@@ -168,12 +179,24 @@ function handleMessage(message) {
     state.activePageId = message.room.activePageId;
     state.pages = message.room.pages;
     state.users = new Map(message.room.users.map((user) => [user.id, user]));
+    state.joined = true;
+    state.reconnectAttempts = 0;
     entryView.classList.add("hidden");
     memoView.classList.remove("hidden");
     roomLabel.textContent = state.roomId;
     setStatus("online");
     switchPage(state.activePageId, false);
     renderAll();
+  }
+
+  if (message.type === "join-error") {
+    state.joined = false;
+    state.socket?.close();
+    entryView.classList.remove("hidden");
+    memoView.classList.add("hidden");
+    entryError.textContent =
+      message.reason === "invalid-password" ? "合言葉が違います。" : "入室できませんでした。";
+    setStatus("offline");
   }
 
   if (message.type === "user-joined") {
@@ -386,6 +409,16 @@ function setStatus(status) {
 
   statusText.textContent = labels[status] || labels.offline;
   statusText.className = `status is-${status}`;
+}
+
+function scheduleReconnect() {
+  if (!state.joined || !state.roomId) return;
+
+  const delay = Math.min(12000, 1000 * 2 ** state.reconnectAttempts);
+  state.reconnectAttempts += 1;
+  state.reconnectTimer = setTimeout(() => {
+    connect();
+  }, delay);
 }
 
 function sendCursor() {

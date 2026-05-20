@@ -1,13 +1,22 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 const port = 3100;
 const baseUrl = `http://localhost:${port}`;
 const wsUrl = `ws://localhost:${port}`;
+const password = "smoke-secret";
+const dataFile = join(tmpdir(), `collaborate-memo-smoke-${Date.now()}.json`);
 const server = spawn(process.execPath, ["server.js"], {
   cwd: new URL("..", import.meta.url),
-  env: { ...process.env, PORT: String(port) },
+  env: {
+    ...process.env,
+    PORT: String(port),
+    ROOM_PASSWORD: password,
+    MEMO_DATA_FILE: dataFile
+  },
   stdio: ["ignore", "pipe", "pipe"]
 });
 
@@ -22,11 +31,18 @@ server.stderr.on("data", (chunk) => {
 
 try {
   await waitForHttp();
+  const health = await fetch(`${baseUrl}/healthz`).then((response) => response.json());
+  assert(health.ok === true, "health endpoint should report ok");
+
   const html = await fetch(baseUrl).then((response) => response.text());
   assert(html.includes("Collaborate Memo"), "index page should load");
 
-  const alice = await connectClient("smoke-room", "Alice");
-  const bob = await connectClient("smoke-room", "Bob");
+  const rejected = await connectClient("smoke-room", "Mallory", "wrong");
+  assert(rejected.error.reason === "invalid-password", "wrong password should be rejected");
+  rejected.socket.close();
+
+  const alice = await connectClient("smoke-room", "Alice", password);
+  const bob = await connectClient("smoke-room", "Bob", password);
   const pageId = alice.joined.room.pages[0].id;
 
   const bobEdit = waitForMessage(bob.socket, (message) => message.type === "page-op", "bob page-op");
@@ -81,12 +97,17 @@ async function waitForHttp() {
   throw new Error("server did not become ready");
 }
 
-async function connectClient(roomId, userName) {
+async function connectClient(roomId, userName, roomPassword) {
   const socket = new WebSocket(wsUrl);
   await once(socket, "open");
-  const joined = waitForMessage(socket, (message) => message.type === "joined", `${userName} joined`);
-  socket.send(JSON.stringify({ type: "join", roomId, userName }));
-  return { socket, joined: await joined };
+  const result = waitForMessage(
+    socket,
+    (message) => message.type === "joined" || message.type === "join-error",
+    `${userName} joined`
+  );
+  socket.send(JSON.stringify({ type: "join", roomId, userName, password: roomPassword }));
+  const message = await result;
+  return message.type === "joined" ? { socket, joined: message } : { socket, error: message };
 }
 
 function waitForMessage(socket, predicate, label, timeoutMs = 3000) {

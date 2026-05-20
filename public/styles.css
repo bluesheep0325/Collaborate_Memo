@@ -110,6 +110,14 @@ textarea:focus {
   background: #fff;
 }
 
+.entry-error {
+  min-height: 20px;
+  margin: -6px 0 0;
+  color: #b91c1c;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
 .join-form button,
 .secondary-button {
   min-height: 42px;
