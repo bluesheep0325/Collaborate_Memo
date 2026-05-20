@@ -386,11 +386,14 @@ textarea:focus {
   background: var(--cursor-color);
 }
 
-.remote-cursor span {
+.remote-cursor-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   position: absolute;
   top: -22px;
   left: 0;
-  max-width: 140px;
+  max-width: 220px;
   overflow: hidden;
   padding: 2px 7px;
   border-radius: 4px;
@@ -402,6 +405,26 @@ textarea:focus {
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.remote-cursor-colors {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.remote-cursor-colors i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  margin-left: -2px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 50%;
+  background: var(--cursor-color);
+}
+
+.remote-cursor-colors i:first-child {
+  margin-left: 0;
 }
 
 @media (max-width: 760px) {

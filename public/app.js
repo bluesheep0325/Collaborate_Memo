@@ -321,22 +321,48 @@ function renderCursors() {
   const cursors = [...state.users.values()].filter(
     (user) => user.id !== state.selfId && user.cursor?.pageId === state.activePageId
   );
+  const cursorGroups = groupCursorsByPosition(cursors);
 
   cursorLayer.replaceChildren(
-    ...cursors.map((user) => {
-      const point = caretPoint(memoInput, user.cursor.index);
+    ...cursorGroups.map((group) => {
+      const point = caretPoint(memoInput, group.index);
       const cursor = document.createElement("div");
       cursor.className = "remote-cursor";
       cursor.style.left = `${point.left}px`;
       cursor.style.top = `${point.top}px`;
-      cursor.style.setProperty("--cursor-color", user.color);
+      cursor.style.setProperty("--cursor-color", group.users[0].color);
 
       const label = document.createElement("span");
-      label.textContent = user.name;
+      label.className = "remote-cursor-label";
+      label.textContent = group.users.map((user) => user.name).join(", ");
+
+      const colorStack = document.createElement("strong");
+      colorStack.className = "remote-cursor-colors";
+      for (const user of group.users) {
+        const dot = document.createElement("i");
+        dot.style.setProperty("--cursor-color", user.color);
+        colorStack.append(dot);
+      }
+
+      label.prepend(colorStack);
       cursor.append(label);
       return cursor;
     })
   );
+}
+
+function groupCursorsByPosition(users) {
+  const groups = new Map();
+
+  for (const user of users) {
+    const index = Number(user.cursor.index) || 0;
+    const key = `${user.cursor.pageId}:${index}`;
+    const group = groups.get(key) || { index, users: [] };
+    group.users.push(user);
+    groups.set(key, group);
+  }
+
+  return [...groups.values()];
 }
 
 function switchPage(pageId, notify) {
