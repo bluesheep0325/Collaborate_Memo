@@ -369,6 +369,7 @@ function handleMessage(socket, raw) {
   if (message.type === "page-op") handlePageOp(socket, room, message);
   if (message.type === "cursor") handleCursor(socket, room, message);
   if (message.type === "add-page") handleAddPage(socket, room, message);
+  if (message.type === "delete-page") handleDeletePage(socket, room, message);
   if (message.type === "rename-page") handleRenamePage(socket, room, message);
   if (message.type === "switch-page") handleSwitchPage(socket, room, message);
   if (message.type === "heartbeat") socket.send(JSON.stringify({ type: "heartbeat" }));
@@ -473,6 +474,29 @@ function handleAddPage(socket, room, message) {
   room.activePageId = page.id;
   scheduleSave();
   broadcast(room, { type: "page-added", page: { id: page.id, title: page.title, text: "", version: 0 } });
+}
+
+function handleDeletePage(socket, room, message) {
+  if (room.pages.length <= 1) return;
+
+  const pageIndex = room.pages.findIndex((item) => item.id === message.pageId);
+  if (pageIndex === -1) return;
+
+  const [deletedPage] = room.pages.splice(pageIndex, 1);
+  const fallbackPage = room.pages[Math.min(pageIndex, room.pages.length - 1)];
+  if (room.activePageId === deletedPage.id) {
+    room.activePageId = fallbackPage.id;
+  }
+
+  for (const user of room.users.values()) {
+    if (user.activePageId === deletedPage.id || user.cursor?.pageId === deletedPage.id) {
+      user.activePageId = fallbackPage.id;
+      user.cursor = { pageId: fallbackPage.id, index: 0 };
+    }
+  }
+
+  scheduleSave();
+  broadcast(room, { type: "page-deleted", pageId: deletedPage.id, activePageId: fallbackPage.id });
 }
 
 function handleRenamePage(socket, room, message) {

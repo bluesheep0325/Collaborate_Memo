@@ -2,6 +2,8 @@
 
 Browser-based realtime collaborative memo app for small rooms.
 
+Reloading the page rejoins the current room in the same browser tab. Use `退出` to leave the room and clear that tab session.
+
 ## Start
 
 ```powershell

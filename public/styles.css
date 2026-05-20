@@ -119,18 +119,55 @@ textarea:focus {
 }
 
 .join-form button,
-.secondary-button {
+.secondary-button,
+.danger-button,
+.ghost-button {
   min-height: 42px;
   border: 0;
   border-radius: 6px;
+  font-weight: 800;
+}
+
+.join-form button,
+.secondary-button {
   background: var(--accent);
   color: #fff;
-  font-weight: 800;
 }
 
 .join-form button:hover,
 .secondary-button:hover {
   background: var(--accent-strong);
+}
+
+.danger-button,
+.ghost-button {
+  flex: 0 0 auto;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.danger-button {
+  color: #b91c1c;
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.danger-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ghost-button {
+  color: var(--muted);
+}
+
+.ghost-button:hover {
+  border-color: #b8c2d2;
+  background: #f6f7f9;
 }
 
 .memo-view {
@@ -306,8 +343,9 @@ textarea:focus {
 .toolbar-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 14px;
+  gap: 10px;
   min-width: 0;
 }
 

@@ -73,6 +73,11 @@ try {
   const renameMessage = await aliceRename;
   assert(renameMessage.title === "Renamed page", "renamed page title should reach the other user");
 
+  const aliceDelete = waitForMessage(alice.socket, (message) => message.type === "page-deleted", "alice page-deleted");
+  bob.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
+  const deleteMessage = await aliceDelete;
+  assert(deleteMessage.pageId === pageMessage.page.id, "deleted page should reach the other user");
+
   alice.socket.close();
   bob.socket.close();
   console.log("Smoke test passed");

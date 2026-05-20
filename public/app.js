@@ -12,9 +12,12 @@ const pageTitleInput = document.querySelector("#pageTitleInput");
 const editTitleButton = document.querySelector("#editTitleButton");
 const statusText = document.querySelector("#statusText");
 const userList = document.querySelector("#userList");
+const deletePageButton = document.querySelector("#deletePageButton");
 const saveButton = document.querySelector("#saveButton");
+const leaveButton = document.querySelector("#leaveButton");
 const memoInput = document.querySelector("#memoInput");
 const cursorLayer = document.querySelector("#cursorLayer");
+const sessionKey = "collaborate-memo-session";
 
 const state = {
   socket: null,
@@ -32,7 +35,8 @@ const state = {
   reconnectTimer: null,
   heartbeatTimer: null,
   reconnectAttempts: 0,
-  joined: false
+  joined: false,
+  leaving: false
 };
 
 const params = new URLSearchParams(location.search);
@@ -54,6 +58,14 @@ joinForm.addEventListener("submit", (event) => {
 addPageButton.addEventListener("click", () => {
   send({ type: "add-page", title: `Page ${state.pages.length + 1}` });
 });
+
+deletePageButton.addEventListener("click", () => {
+  const page = currentPage();
+  if (!page || state.pages.length <= 1) return;
+  send({ type: "delete-page", pageId: page.id });
+});
+
+leaveButton.addEventListener("click", leaveRoom);
 
 editTitleButton.addEventListener("click", () => {
   if (pageTitleInput.readOnly) {
@@ -140,6 +152,7 @@ saveButton.addEventListener("click", () => {
 
 function connect(roomId = state.roomId, userName = state.userName, password = state.password) {
   clearTimeout(state.reconnectTimer);
+  state.leaving = false;
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${location.host}`);
 
@@ -184,6 +197,7 @@ function handleMessage(message) {
     state.joined = true;
     state.reconnectAttempts = 0;
     startHeartbeat();
+    saveSession();
     entryView.classList.add("hidden");
     memoView.classList.remove("hidden");
     roomLabel.textContent = state.roomId;
@@ -195,6 +209,7 @@ function handleMessage(message) {
   if (message.type === "join-error") {
     state.joined = false;
     stopHeartbeat();
+    clearSession();
     state.socket?.close();
     entryView.classList.remove("hidden");
     memoView.classList.add("hidden");
@@ -235,6 +250,16 @@ function handleMessage(message) {
     state.pages.push(message.page);
     state.activePageId = message.page.id;
     switchPage(message.page.id, false);
+    renderAll();
+  }
+
+  if (message.type === "page-deleted") {
+    state.pages = state.pages.filter((page) => page.id !== message.pageId);
+    if (state.pages.length === 0) return;
+    const nextPageId = state.pages.some((page) => page.id === state.activePageId)
+      ? state.activePageId
+      : message.activePageId || state.pages[0].id;
+    switchPage(nextPageId, false);
     renderAll();
   }
 
@@ -291,6 +316,8 @@ function renderPages() {
       return button;
     })
   );
+  deletePageButton.disabled = state.pages.length <= 1;
+  deletePageButton.title = state.pages.length <= 1 ? "最後のページは削除できません" : "現在のページを削除";
 }
 
 function renderUsers() {
@@ -446,7 +473,7 @@ function setStatus(status) {
 }
 
 function scheduleReconnect() {
-  if (!state.joined || !state.roomId) return;
+  if (state.leaving || !state.joined || !state.roomId) return;
 
   const delay = Math.min(12000, 1000 * 2 ** state.reconnectAttempts);
   state.reconnectAttempts += 1;
@@ -476,6 +503,48 @@ function sendCursor() {
     user.cursor = { pageId: page.id, index: memoInput.selectionStart };
     user.activePageId = page.id;
   }
+}
+
+function saveSession() {
+  sessionStorage.setItem(
+    sessionKey,
+    JSON.stringify({
+      roomId: state.roomId,
+      userName: state.userName,
+      password: state.password
+    })
+  );
+}
+
+function loadSession() {
+  try {
+    return JSON.parse(sessionStorage.getItem(sessionKey) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function clearSession() {
+  sessionStorage.removeItem(sessionKey);
+}
+
+function leaveRoom() {
+  state.leaving = true;
+  state.joined = false;
+  clearTimeout(state.reconnectTimer);
+  stopHeartbeat();
+  clearSession();
+  state.socket?.close();
+  state.socket = null;
+  state.selfId = "";
+  state.activePageId = "";
+  state.pages = [];
+  state.users = new Map();
+  state.lastValue = "";
+  entryError.textContent = "";
+  memoView.classList.add("hidden");
+  entryView.classList.remove("hidden");
+  setStatus("offline");
 }
 
 function diffText(before, after) {
@@ -570,4 +639,12 @@ function caretPoint(textarea, position) {
     left: Math.min(Math.max(left, 0), textareaRect.width - 20),
     top: Math.min(Math.max(top, 0), textareaRect.height - parseFloat(style.lineHeight))
   };
+}
+
+const savedSession = loadSession();
+if (savedSession?.roomId && savedSession?.userName) {
+  roomInput.value = savedSession.roomId;
+  nameInput.value = savedSession.userName;
+  passwordInput.value = savedSession.password || "";
+  connect(savedSession.roomId, savedSession.userName, savedSession.password || "");
 }
