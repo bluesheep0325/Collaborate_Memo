@@ -52,3 +52,11 @@ $env:MEMO_DATA_FILE='C:\memo-data\rooms.json'; npm start
 ```powershell
 npm test
 ```
+
+## Verify a Deployed App
+
+```powershell
+$env:DEPLOY_URL='https://your-app.onrender.com'
+$env:ROOM_PASSWORD='<shared room passphrase>'
+npm run verify:deploy
+```

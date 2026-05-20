@@ -18,6 +18,18 @@ This setup is intended for occasional meetings, such as a weekly 3-hour session.
 5. Open the generated `https://...onrender.com` URL.
 6. Share the URL, room ID, user name convention, and passphrase with meeting participants.
 
+## Verify
+
+After deploy:
+
+```powershell
+$env:DEPLOY_URL='https://your-app.onrender.com'
+$env:ROOM_PASSWORD='<shared room passphrase>'
+npm run verify:deploy
+```
+
+This checks the health endpoint, page load, WebSocket join, and heartbeat.
+
 ## Optional
 
 Set `ALLOWED_ORIGINS` after the first deploy if you want WebSocket connections to be accepted only from the Render URL.
