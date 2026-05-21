@@ -585,6 +585,7 @@ function handlePageOp(socket, room, message) {
     op,
     version: page.version,
     userId: socket.id,
+    sequence: message.sequence,
     cursor: user?.cursor
   });
 }
@@ -610,6 +611,7 @@ function handlePageReplace(socket, room, message) {
     text: page.text,
     version: page.version,
     userId: socket.id,
+    sequence: message.sequence,
     cursor: user?.cursor
   });
 }

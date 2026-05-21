@@ -38,6 +38,8 @@ const state = {
   joined: false,
   leaving: false,
   forceNextInputReplace: false,
+  composing: false,
+  pendingOps: new Map(),
   maxPageChars: 0
 };
 
@@ -113,6 +115,11 @@ memoInput.addEventListener("input", (event) => {
   if (!page) return;
 
   const nextValue = memoInput.value;
+  if (state.composing || event.isComposing) {
+    page.text = nextValue;
+    return;
+  }
+
   const shouldReplaceText =
     state.forceNextInputReplace ||
     event.inputType === "insertFromPaste" ||
@@ -131,6 +138,7 @@ memoInput.addEventListener("input", (event) => {
   state.lastValue = nextValue;
   page.version += 1;
   state.localSequence += 1;
+  rememberPendingOp(page.id, state.localSequence, op);
 
   send({
     type: "page-op",
@@ -152,6 +160,36 @@ memoInput.addEventListener("paste", () => {
       replacePageText(page, memoInput.value);
     }
   }, 0);
+});
+
+memoInput.addEventListener("compositionstart", () => {
+  state.composing = true;
+});
+
+memoInput.addEventListener("compositionend", () => {
+  const page = currentPage();
+  state.composing = false;
+  if (!page || memoInput.value === state.lastValue) return;
+
+  const nextValue = memoInput.value;
+  const op = diffText(state.lastValue, nextValue);
+  if (!op) return;
+
+  page.text = nextValue;
+  state.lastValue = nextValue;
+  page.version += 1;
+  state.localSequence += 1;
+  rememberPendingOp(page.id, state.localSequence, op);
+
+  send({
+    type: "page-op",
+    pageId: page.id,
+    op,
+    baseVersion: page.version - 1,
+    sequence: state.localSequence,
+    cursor: localCursorPayload()
+  });
+  sendCursor();
 });
 
 memoInput.addEventListener("keyup", sendCursor);
@@ -222,6 +260,7 @@ function handleMessage(message) {
     state.activePageId = message.room.activePageId;
     state.pages = message.room.pages;
     state.users = new Map(message.room.users.map((user) => [user.id, user]));
+    state.pendingOps = new Map();
     state.maxPageChars = Number(message.limits?.maxPageChars) || 0;
     state.joined = true;
     state.reconnectAttempts = 0;
@@ -311,20 +350,24 @@ function handleMessage(message) {
 
 function receivePageOp(message) {
   const page = state.pages.find((item) => item.id === message.pageId);
-  if (!page || message.userId === state.selfId) {
-    if (page) page.version = Math.max(page.version, message.version);
+  if (!page) return;
+
+  if (message.userId === state.selfId) {
+    forgetPendingOp(page.id, message.sequence);
+    page.version = Math.max(page.version, message.version);
     return;
   }
 
-  page.text = applyOp(page.text, message.op);
+  const op = transformRemoteOpForLocalPage(page.id, message.op);
+  page.text = applyOp(page.text, op);
   page.version = Math.max(page.version, message.version);
 
   const user = state.users.get(message.userId);
   if (user && message.cursor) user.cursor = message.cursor;
 
   if (page.id === state.activePageId) {
-    const selectionStart = transformPosition(memoInput.selectionStart, message.op);
-    const selectionEnd = transformPosition(memoInput.selectionEnd, message.op);
+    const selectionStart = transformPosition(memoInput.selectionStart, op);
+    const selectionEnd = transformPosition(memoInput.selectionEnd, op);
     memoInput.value = page.text;
     state.lastValue = page.text;
     memoInput.setSelectionRange(selectionStart, selectionEnd);
@@ -334,11 +377,15 @@ function receivePageOp(message) {
 
 function receivePageReplace(message) {
   const page = state.pages.find((item) => item.id === message.pageId);
-  if (!page || message.userId === state.selfId) {
-    if (page) page.version = Math.max(page.version, message.version);
+  if (!page) return;
+
+  if (message.userId === state.selfId) {
+    forgetPendingOp(page.id, message.sequence);
+    page.version = Math.max(page.version, message.version);
     return;
   }
 
+  clearPendingOps(page.id);
   page.text = message.text;
   page.version = Math.max(page.version, message.version);
 
@@ -601,6 +648,8 @@ function replacePageText(page, text) {
   state.lastValue = nextText;
   page.version += 1;
   state.localSequence += 1;
+  clearPendingOps(page.id);
+  rememberPendingOp(page.id, state.localSequence, { replace: true });
 
   send({
     type: "page-replace",
@@ -663,6 +712,8 @@ function leaveRoom() {
   state.pages = [];
   state.users = new Map();
   state.lastValue = "";
+  state.composing = false;
+  state.pendingOps = new Map();
   entryError.textContent = "";
   memoView.classList.add("hidden");
   entryView.classList.remove("hidden");
@@ -695,13 +746,61 @@ function applyOp(text, op) {
   return text.slice(0, op.start) + op.insert + text.slice(op.start + op.deleteCount);
 }
 
-function transformPosition(position, op) {
+function transformPosition(position, op, preferAfterInsert = true) {
   const start = op.start;
   const end = op.start + op.deleteCount;
 
   if (position < start) return position;
   if (position > end) return position + op.insert.length - op.deleteCount;
-  return start + op.insert.length;
+  return start + (preferAfterInsert ? op.insert.length : 0);
+}
+
+function transformOp(incoming, applied, preferAfterInsert = true) {
+  if (incoming.replace || applied.replace) return incoming;
+
+  const start = transformPosition(incoming.start, applied, preferAfterInsert && incoming.insert.length > 0);
+  const end = transformPosition(incoming.start + incoming.deleteCount, applied, false);
+
+  return {
+    start: Math.max(0, start),
+    deleteCount: Math.max(0, end - start),
+    insert: incoming.insert
+  };
+}
+
+function pendingOpsFor(pageId) {
+  if (!state.pendingOps.has(pageId)) state.pendingOps.set(pageId, []);
+  return state.pendingOps.get(pageId);
+}
+
+function rememberPendingOp(pageId, sequence, op) {
+  pendingOpsFor(pageId).push({ sequence, op });
+}
+
+function forgetPendingOp(pageId, sequence) {
+  if (!sequence) return;
+
+  const pending = pendingOpsFor(pageId);
+  const index = pending.findIndex((item) => item.sequence === sequence);
+  if (index !== -1) pending.splice(index, 1);
+}
+
+function clearPendingOps(pageId) {
+  pendingOpsFor(pageId).length = 0;
+}
+
+function transformRemoteOpForLocalPage(pageId, remoteOp) {
+  const pending = pendingOpsFor(pageId);
+  if (pending.some((item) => item.op.replace)) return remoteOp;
+
+  let transformedRemote = remoteOp;
+  for (const item of pending) {
+    transformedRemote = transformOp(transformedRemote, item.op, false);
+  }
+  for (const item of pending) {
+    item.op = transformOp(item.op, transformedRemote, true);
+  }
+  return transformedRemote;
 }
 
 function caretPoint(textarea, position) {
