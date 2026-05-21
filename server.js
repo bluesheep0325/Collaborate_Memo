@@ -400,7 +400,7 @@ function joinRoom(socket, message) {
     id: socket.id,
     name: String(message.userName || "Guest").trim().slice(0, 24) || "Guest",
     color: colorPalette[colorIndex],
-    cursor: { pageId: room.activePageId, index: 0 },
+    cursor: { pageId: room.activePageId, index: 0, start: 0, end: 0 },
     activePageId: room.activePageId
   };
 
@@ -439,7 +439,7 @@ function handlePageOp(socket, room, message) {
 
   const user = room.users.get(socket.id);
   if (user && message.cursor) {
-    user.cursor = { pageId: page.id, index: clamp(Number(message.cursor.index) || 0, 0, page.text.length) };
+    user.cursor = normalizeCursor(page, message.cursor);
     user.activePageId = page.id;
   }
 
@@ -458,10 +458,7 @@ function handleCursor(socket, room, message) {
   const page = room.pages.find((item) => item.id === message.pageId);
   if (!user || !page) return;
 
-  user.cursor = {
-    pageId: page.id,
-    index: clamp(Number(message.index) || 0, 0, page.text.length)
-  };
+  user.cursor = normalizeCursor(page, message);
   user.activePageId = page.id;
   broadcast(room, { type: "cursor", userId: socket.id, cursor: user.cursor }, socket);
 }
@@ -491,7 +488,7 @@ function handleDeletePage(socket, room, message) {
   for (const user of room.users.values()) {
     if (user.activePageId === deletedPage.id || user.cursor?.pageId === deletedPage.id) {
       user.activePageId = fallbackPage.id;
-      user.cursor = { pageId: fallbackPage.id, index: 0 };
+      user.cursor = { pageId: fallbackPage.id, index: 0, start: 0, end: 0 };
     }
   }
 
@@ -512,8 +509,21 @@ function handleSwitchPage(socket, room, message) {
   const page = room.pages.find((item) => item.id === message.pageId);
   if (!user || !page) return;
   user.activePageId = page.id;
-  user.cursor = { pageId: page.id, index: 0 };
+  user.cursor = { pageId: page.id, index: 0, start: 0, end: 0 };
   broadcast(room, { type: "cursor", userId: socket.id, cursor: user.cursor }, socket);
+}
+
+function normalizeCursor(page, cursor) {
+  const start = clamp(Number(cursor.start ?? cursor.index) || 0, 0, page.text.length);
+  const end = clamp(Number(cursor.end ?? cursor.index) || 0, 0, page.text.length);
+  const index = clamp(Number(cursor.index ?? end) || 0, 0, page.text.length);
+
+  return {
+    pageId: page.id,
+    index,
+    start: Math.min(start, end),
+    end: Math.max(start, end)
+  };
 }
 
 function leave(socket) {

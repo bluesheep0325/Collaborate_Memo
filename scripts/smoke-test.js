@@ -59,9 +59,11 @@ try {
   assert(editMessage.op.insert === "hello", "text operation should reach the other user");
 
   const aliceCursor = waitForMessage(alice.socket, (message) => message.type === "cursor", "alice cursor");
-  bob.socket.send(JSON.stringify({ type: "cursor", pageId, index: 3 }));
+  bob.socket.send(JSON.stringify({ type: "cursor", pageId, index: 5, start: 1, end: 5 }));
   const cursorMessage = await aliceCursor;
-  assert(cursorMessage.cursor.index === 3, "cursor position should reach the other user");
+  assert(cursorMessage.cursor.index === 5, "cursor position should reach the other user");
+  assert(cursorMessage.cursor.start === 1, "selection start should reach the other user");
+  assert(cursorMessage.cursor.end === 5, "selection end should reach the other user");
 
   const bobPage = waitForMessage(bob.socket, (message) => message.type === "page-added", "bob page-added");
   alice.socket.send(JSON.stringify({ type: "add-page", title: "Second page" }));

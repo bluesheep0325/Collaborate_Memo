@@ -422,6 +422,7 @@ textarea:focus {
   width: 2px;
   height: 1.65em;
   background: var(--cursor-color);
+  z-index: 2;
 }
 
 .remote-cursor-label {
@@ -463,6 +464,30 @@ textarea:focus {
 
 .remote-cursor-colors i:first-child {
   margin-left: 0;
+}
+
+.remote-selection {
+  position: absolute;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  z-index: 1;
+}
+
+.remote-selection-label {
+  position: absolute;
+  top: -22px;
+  left: 0;
+  max-width: 140px;
+  overflow: hidden;
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: #fff;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 760px) {

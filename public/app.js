@@ -125,7 +125,7 @@ memoInput.addEventListener("input", () => {
     op,
     baseVersion: page.version - 1,
     sequence: state.localSequence,
-    cursor: { index: memoInput.selectionStart }
+    cursor: localCursorPayload()
   });
   sendCursor();
 });
@@ -133,8 +133,12 @@ memoInput.addEventListener("input", () => {
 memoInput.addEventListener("keyup", sendCursor);
 memoInput.addEventListener("click", sendCursor);
 memoInput.addEventListener("select", sendCursor);
+memoInput.addEventListener("mouseup", sendCursor);
 memoInput.addEventListener("scroll", renderCursors);
 window.addEventListener("resize", renderCursors);
+document.addEventListener("selectionchange", () => {
+  if (document.activeElement === memoInput) sendCursor();
+});
 
 saveButton.addEventListener("click", () => {
   const page = currentPage();
@@ -349,8 +353,10 @@ function renderCursors() {
     (user) => user.id !== state.selfId && user.cursor?.pageId === state.activePageId
   );
   const cursorGroups = groupCursorsByPosition(cursors);
+  const selections = cursors.flatMap((user) => renderSelectionForUser(user));
 
   cursorLayer.replaceChildren(
+    ...selections,
     ...cursorGroups.map((group) => {
       const point = caretPoint(memoInput, group.index);
       const cursor = document.createElement("div");
@@ -376,6 +382,34 @@ function renderCursors() {
       return cursor;
     })
   );
+}
+
+function renderSelectionForUser(user) {
+  const start = Number(user.cursor.start ?? user.cursor.index) || 0;
+  const end = Number(user.cursor.end ?? user.cursor.index) || 0;
+  if (start === end) return [];
+
+  const rects = selectionRects(memoInput, Math.min(start, end), Math.max(start, end));
+  return rects.map((rect, index) => {
+    const selection = document.createElement("div");
+    selection.className = "remote-selection";
+    selection.style.left = `${rect.left}px`;
+    selection.style.top = `${rect.top}px`;
+    selection.style.width = `${rect.width}px`;
+    selection.style.height = `${rect.height}px`;
+    selection.style.background = hexToRgba(user.color, 0.18);
+    selection.style.borderColor = hexToRgba(user.color, 0.34);
+
+    if (index === 0) {
+      const label = document.createElement("span");
+      label.className = "remote-selection-label";
+      label.textContent = user.name;
+      label.style.background = user.color;
+      selection.append(label);
+    }
+
+    return selection;
+  });
 }
 
 function groupCursorsByPosition(users) {
@@ -497,12 +531,27 @@ function stopHeartbeat() {
 function sendCursor() {
   const page = currentPage();
   if (!page) return;
-  send({ type: "cursor", pageId: page.id, index: memoInput.selectionStart });
+  const payload = localCursorPayload();
+  send({ type: "cursor", ...payload });
   const user = state.users.get(state.selfId);
   if (user) {
-    user.cursor = { pageId: page.id, index: memoInput.selectionStart };
+    user.cursor = payload;
     user.activePageId = page.id;
   }
+}
+
+function localCursorPayload() {
+  const page = currentPage();
+  const start = memoInput.selectionStart;
+  const end = memoInput.selectionEnd;
+  const index = memoInput.selectionDirection === "backward" ? start : end;
+
+  return {
+    pageId: page.id,
+    index,
+    start: Math.min(start, end),
+    end: Math.max(start, end)
+  };
 }
 
 function saveSession() {
@@ -639,6 +688,97 @@ function caretPoint(textarea, position) {
     left: Math.min(Math.max(left, 0), textareaRect.width - 20),
     top: Math.min(Math.max(top, 0), textareaRect.height - parseFloat(style.lineHeight))
   };
+}
+
+function selectionRects(textarea, start, end) {
+  const style = getComputedStyle(textarea);
+  const mirror = document.createElement("div");
+  const selection = document.createElement("span");
+  const properties = [
+    "boxSizing",
+    "width",
+    "height",
+    "borderTopWidth",
+    "borderRightWidth",
+    "borderBottomWidth",
+    "borderLeftWidth",
+    "paddingTop",
+    "paddingRight",
+    "paddingBottom",
+    "paddingLeft",
+    "fontFamily",
+    "fontSize",
+    "fontWeight",
+    "letterSpacing",
+    "lineHeight",
+    "tabSize",
+    "textTransform",
+    "textAlign",
+    "whiteSpace",
+    "wordBreak",
+    "overflowWrap"
+  ];
+
+  mirror.style.position = "absolute";
+  mirror.style.visibility = "hidden";
+  mirror.style.top = "0";
+  mirror.style.left = "-9999px";
+  mirror.style.whiteSpace = "pre-wrap";
+  mirror.style.overflowWrap = "break-word";
+  mirror.style.overflow = "hidden";
+
+  for (const property of properties) {
+    mirror.style[property] = style[property];
+  }
+
+  mirror.append(document.createTextNode(textarea.value.slice(0, start)));
+  selection.textContent = textarea.value.slice(start, end);
+  mirror.append(selection);
+  mirror.append(document.createTextNode(textarea.value.slice(end) || "\u200b"));
+  document.body.append(mirror);
+
+  const textareaRect = textarea.getBoundingClientRect();
+  const mirrorRect = mirror.getBoundingClientRect();
+  const lineHeight = parseFloat(style.lineHeight);
+  const rects = [...selection.getClientRects()]
+    .map((rect) => ({
+      left: rect.left - mirrorRect.left + textarea.offsetLeft - textarea.scrollLeft,
+      top: rect.top - mirrorRect.top + textarea.offsetTop - textarea.scrollTop,
+      width: rect.width,
+      height: Math.max(rect.height, lineHeight)
+    }))
+    .filter((rect) => rect.width > 0 && rect.top + rect.height > 0 && rect.top < textareaRect.height);
+
+  mirror.remove();
+
+  return rects.map((rect) => {
+    const top = Math.max(0, rect.top);
+    const left = Math.max(0, rect.left);
+    const right = Math.min(textareaRect.width, rect.left + rect.width);
+    return {
+      left,
+      top,
+      width: Math.max(0, right - left),
+      height: Math.min(rect.height, textareaRect.height - top)
+    };
+  });
+}
+
+function hexToRgba(hex, alpha) {
+  const normalized = hex.replace("#", "");
+  const value = Number.parseInt(
+    normalized.length === 3
+      ? normalized
+          .split("")
+          .map((char) => char + char)
+          .join("")
+      : normalized,
+    16
+  );
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
 const savedSession = loadSession();
