@@ -12,6 +12,11 @@ const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "0.0.0.0";
 const roomPassword = process.env.ROOM_PASSWORD || "";
 const dataFile = process.env.MEMO_DATA_FILE || join(root, "data", "rooms.json");
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabaseTable = process.env.SUPABASE_TABLE || "memo_rooms";
+const supabaseRetentionDays = Number(process.env.SUPABASE_RETENTION_DAYS || 7);
+const useSupabase = Boolean(supabaseUrl && supabaseServiceRoleKey);
 const roomTtlMs = Number(process.env.ROOM_TTL_MS || 0);
 const maxRooms = Number(process.env.MAX_ROOMS || 100);
 const maxUsersPerRoom = Number(process.env.MAX_USERS_PER_ROOM || 10);
@@ -127,6 +132,12 @@ function serializeRoomForStorage(room) {
 }
 
 async function loadRooms() {
+  if (useSupabase) {
+    await cleanupSupabaseRooms();
+    await loadRoomsFromSupabase();
+    return;
+  }
+
   try {
     const saved = JSON.parse(await readFile(dataFile, "utf8"));
     for (const roomData of saved.rooms || []) {
@@ -159,12 +170,101 @@ function scheduleSave() {
 }
 
 async function saveRooms() {
+  if (useSupabase) {
+    await saveRoomsToSupabase();
+    return;
+  }
+
   const payload = {
     savedAt: new Date().toISOString(),
     rooms: [...rooms.values()].map(serializeRoomForStorage)
   };
   await mkdir(dirname(dataFile), { recursive: true });
   await writeFile(dataFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function loadRoomsFromSupabase() {
+  const cutoff = new Date(Date.now() - supabaseRetentionDays * 24 * 60 * 60 * 1000).toISOString();
+  const query = new URLSearchParams({
+    select: "room_id,active_page_id,pages",
+    updated_at: `gte.${cutoff}`,
+    order: "updated_at.desc",
+    limit: String(maxRooms)
+  });
+  const rows = await supabaseRequest(`/${supabaseTable}?${query}`);
+
+  for (const row of rows || []) {
+    const pages = Array.isArray(row.pages) && row.pages.length > 0 ? row.pages : [createPage("Page 1")];
+    for (const page of pages) {
+      page.history = [];
+      page.version = Number(page.version) || 0;
+      page.text = String(page.text || "");
+      page.title = String(page.title || "Untitled");
+    }
+    rooms.set(row.room_id, {
+      id: row.room_id,
+      pages,
+      activePageId: row.active_page_id || pages[0].id,
+      users: new Map()
+    });
+  }
+}
+
+async function saveRoomsToSupabase() {
+  const now = new Date().toISOString();
+  const rows = [...rooms.values()].map((room) => ({
+    room_id: room.id,
+    active_page_id: room.activePageId,
+    pages: serializeRoomForStorage(room).pages,
+    updated_at: now
+  }));
+
+  if (rows.length === 0) return;
+
+  await supabaseRequest(`/${supabaseTable}?on_conflict=room_id`, {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify(rows)
+  });
+}
+
+async function deleteRoomFromSupabase(roomId) {
+  if (!useSupabase) return;
+  await supabaseRequest(`/${supabaseTable}?room_id=eq.${encodeURIComponent(roomId)}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=minimal" }
+  });
+}
+
+async function cleanupSupabaseRooms() {
+  if (!Number.isFinite(supabaseRetentionDays) || supabaseRetentionDays <= 0) return;
+  const cutoff = new Date(Date.now() - supabaseRetentionDays * 24 * 60 * 60 * 1000).toISOString();
+  await supabaseRequest(`/${supabaseTable}?updated_at=lt.${encodeURIComponent(cutoff)}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=minimal" }
+  });
+}
+
+async function supabaseRequest(path, options = {}) {
+  const baseUrl = supabaseUrl.replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/rest/v1${path}`, {
+    ...options,
+    headers: {
+      apikey: supabaseServiceRoleKey,
+      Authorization: `Bearer ${supabaseServiceRoleKey}`,
+      "content-type": "application/json",
+      ...(options.headers || {})
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Supabase request failed: ${response.status} ${text}`);
+  }
+
+  if (response.status === 204) return null;
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
 }
 
 function isAllowedOrigin(request) {
@@ -542,6 +642,7 @@ function leave(socket) {
       const latest = rooms.get(room.id);
       if (latest && latest.users.size === 0) {
         rooms.delete(room.id);
+        deleteRoomFromSupabase(room.id).catch((error) => console.error(`Failed to delete room data: ${error.message}`));
         scheduleSave();
       }
     }, roomTtlMs);

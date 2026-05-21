@@ -27,11 +27,16 @@ Recommended environment variables:
 ```text
 ROOM_PASSWORD=<shared room passphrase>
 ALLOWED_ORIGINS=https://your-app.example.com
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<server-side service role key>
+SUPABASE_RETENTION_DAYS=7
 ```
 
 If `ROOM_PASSWORD` is empty, anyone who can access the URL can enter a room by guessing or knowing the room ID.
 
 Render free web services can spin down when idle and their filesystem is ephemeral. This app sends a heartbeat while users are connected, which helps keep the service awake during a meeting. Treat the server state as session data and export important pages with `TXT保存`.
+
+For short-term persistence across Render restarts, create the Supabase table in [supabase/schema.sql](supabase/schema.sql) and set `SUPABASE_URL` plus `SUPABASE_SERVICE_ROLE_KEY` in Render. Room data older than `SUPABASE_RETENTION_DAYS` is deleted on app startup.
 
 ## Options
 
