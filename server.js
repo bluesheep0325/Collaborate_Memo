@@ -28,6 +28,7 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .filter(Boolean);
 const maxFrameBytes = 128 * 1024;
 let saveTimer = null;
+let lastStorageError = "";
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -165,13 +166,17 @@ async function loadRooms() {
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    saveRooms().catch((error) => console.error(`Failed to save memo data: ${error.message}`));
+    saveRooms().catch((error) => {
+      lastStorageError = error.message;
+      console.error(`Failed to save memo data: ${error.message}`);
+    });
   }, 250);
 }
 
 async function saveRooms() {
   if (useSupabase) {
     await saveRoomsToSupabase();
+    lastStorageError = "";
     return;
   }
 
@@ -181,6 +186,7 @@ async function saveRooms() {
   };
   await mkdir(dirname(dataFile), { recursive: true });
   await writeFile(dataFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  lastStorageError = "";
 }
 
 async function loadRoomsFromSupabase() {
@@ -301,7 +307,22 @@ function serveStatic(request, response) {
         "cache-control": "no-store"
       })
     );
-    response.end(JSON.stringify({ ok: true, rooms: rooms.size, clients: sockets.size }));
+    response.end(
+      JSON.stringify({
+        ok: true,
+        rooms: rooms.size,
+        clients: sockets.size,
+        storage: {
+          backend: useSupabase ? "supabase" : "file",
+          table: useSupabase ? supabaseTable : null,
+          configured: {
+            supabaseUrl: Boolean(supabaseUrl),
+            supabaseServiceRoleKey: Boolean(supabaseServiceRoleKey)
+          },
+          lastError: lastStorageError || null
+        }
+      })
+    );
     return;
   }
 
@@ -653,6 +674,7 @@ await loadRooms();
 
 server.listen(port, host, () => {
   console.log(`Collaborate Memo is running at http://localhost:${port}`);
+  console.log(`Storage backend: ${useSupabase ? `supabase:${supabaseTable}` : `file:${dataFile}`}`);
   for (const address of getLanAddresses()) {
     console.log(`LAN access: http://${address}:${port}`);
   }
