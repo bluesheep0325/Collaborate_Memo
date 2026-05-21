@@ -106,11 +106,20 @@ pageTitleInput.addEventListener("blur", () => {
   if (!pageTitleInput.readOnly) commitTitleEdit();
 });
 
-memoInput.addEventListener("input", () => {
+memoInput.addEventListener("input", (event) => {
   const page = currentPage();
   if (!page) return;
 
   const nextValue = memoInput.value;
+  const shouldReplaceText =
+    event.inputType === "insertFromPaste" ||
+    event.inputType === "insertFromDrop" ||
+    event.inputType === "deleteByCut";
+  if (shouldReplaceText) {
+    replacePageText(page, nextValue);
+    return;
+  }
+
   const op = diffText(state.lastValue, nextValue);
   if (!op) return;
 
@@ -128,6 +137,15 @@ memoInput.addEventListener("input", () => {
     cursor: localCursorPayload()
   });
   sendCursor();
+});
+
+memoInput.addEventListener("paste", () => {
+  setTimeout(() => {
+    const page = currentPage();
+    if (page && memoInput.value !== state.lastValue) {
+      replacePageText(page, memoInput.value);
+    }
+  }, 0);
 });
 
 memoInput.addEventListener("keyup", sendCursor);
@@ -241,6 +259,10 @@ function handleMessage(message) {
     receivePageOp(message);
   }
 
+  if (message.type === "page-replace") {
+    receivePageReplace(message);
+  }
+
   if (message.type === "cursor") {
     const user = state.users.get(message.userId);
     if (user) {
@@ -299,6 +321,28 @@ function receivePageOp(message) {
     memoInput.value = page.text;
     state.lastValue = page.text;
     memoInput.setSelectionRange(selectionStart, selectionEnd);
+    renderCursors();
+  }
+}
+
+function receivePageReplace(message) {
+  const page = state.pages.find((item) => item.id === message.pageId);
+  if (!page || message.userId === state.selfId) {
+    if (page) page.version = Math.max(page.version, message.version);
+    return;
+  }
+
+  page.text = message.text;
+  page.version = Math.max(page.version, message.version);
+
+  const user = state.users.get(message.userId);
+  if (user && message.cursor) user.cursor = message.cursor;
+
+  if (page.id === state.activePageId) {
+    const cursorPosition = Math.min(memoInput.selectionStart, page.text.length);
+    memoInput.value = page.text;
+    state.lastValue = page.text;
+    memoInput.setSelectionRange(cursorPosition, cursorPosition);
     renderCursors();
   }
 }
@@ -538,6 +582,23 @@ function sendCursor() {
     user.cursor = payload;
     user.activePageId = page.id;
   }
+}
+
+function replacePageText(page, text) {
+  page.text = text;
+  state.lastValue = text;
+  page.version += 1;
+  state.localSequence += 1;
+
+  send({
+    type: "page-replace",
+    pageId: page.id,
+    text,
+    baseVersion: page.version - 1,
+    sequence: state.localSequence,
+    cursor: localCursorPayload()
+  });
+  sendCursor();
 }
 
 function localCursorPayload() {

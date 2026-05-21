@@ -488,6 +488,7 @@ function handleMessage(socket, raw) {
   if (!room) return;
 
   if (message.type === "page-op") handlePageOp(socket, room, message);
+  if (message.type === "page-replace") handlePageReplace(socket, room, message);
   if (message.type === "cursor") handleCursor(socket, room, message);
   if (message.type === "add-page") handleAddPage(socket, room, message);
   if (message.type === "delete-page") handleDeletePage(socket, room, message);
@@ -568,6 +569,31 @@ function handlePageOp(socket, room, message) {
     type: "page-op",
     pageId: page.id,
     op,
+    version: page.version,
+    userId: socket.id,
+    cursor: user?.cursor
+  });
+}
+
+function handlePageReplace(socket, room, message) {
+  const page = room.pages.find((item) => item.id === message.pageId);
+  if (!page || typeof message.text !== "string") return;
+
+  page.text = message.text.slice(0, maxPageChars);
+  page.version += 1;
+  page.history = [];
+  scheduleSave();
+
+  const user = room.users.get(socket.id);
+  if (user && message.cursor) {
+    user.cursor = normalizeCursor(page, message.cursor);
+    user.activePageId = page.id;
+  }
+
+  broadcast(room, {
+    type: "page-replace",
+    pageId: page.id,
+    text: page.text,
     version: page.version,
     userId: socket.id,
     cursor: user?.cursor

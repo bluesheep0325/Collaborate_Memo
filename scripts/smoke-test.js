@@ -58,6 +58,18 @@ try {
   const editMessage = await bobEdit;
   assert(editMessage.op.insert === "hello", "text operation should reach the other user");
 
+  const bobReplace = waitForMessage(bob.socket, (message) => message.type === "page-replace", "bob page-replace");
+  alice.socket.send(
+    JSON.stringify({
+      type: "page-replace",
+      pageId,
+      text: "pasted text",
+      cursor: { index: 11, start: 11, end: 11 }
+    })
+  );
+  const replaceMessage = await bobReplace;
+  assert(replaceMessage.text === "pasted text", "full page replace should reach the other user");
+
   const aliceCursor = waitForMessage(alice.socket, (message) => message.type === "cursor", "alice cursor");
   bob.socket.send(JSON.stringify({ type: "cursor", pageId, index: 5, start: 1, end: 5 }));
   const cursorMessage = await aliceCursor;
