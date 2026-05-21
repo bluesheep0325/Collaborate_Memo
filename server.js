@@ -22,11 +22,11 @@ const maxRooms = Number(process.env.MAX_ROOMS || 100);
 const maxUsersPerRoom = Number(process.env.MAX_USERS_PER_ROOM || 10);
 const maxPagesPerRoom = Number(process.env.MAX_PAGES_PER_ROOM || 50);
 const maxPageChars = Number(process.env.MAX_PAGE_CHARS || 200000);
+const maxFrameBytes = Number(process.env.MAX_FRAME_BYTES || Math.max(1024 * 1024, maxPageChars * 4 + 16384));
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
-const maxFrameBytes = 128 * 1024;
 let saveTimer = null;
 let lastStorageError = "";
 
@@ -320,6 +320,13 @@ function serveStatic(request, response) {
             supabaseServiceRoleKey: Boolean(supabaseServiceRoleKey)
           },
           lastError: lastStorageError || null
+        },
+        limits: {
+          maxPageChars,
+          maxFrameBytes,
+          maxRooms,
+          maxUsersPerRoom,
+          maxPagesPerRoom
         }
       })
     );
@@ -528,7 +535,14 @@ function joinRoom(socket, message) {
 
   socket.roomId = roomId;
   room.users.set(socket.id, user);
-  socket.send(JSON.stringify({ type: "joined", selfId: socket.id, room: serializeRoom(room) }));
+  socket.send(
+    JSON.stringify({
+      type: "joined",
+      selfId: socket.id,
+      room: serializeRoom(room),
+      limits: { maxPageChars }
+    })
+  );
   broadcast(room, { type: "user-joined", user }, socket);
 }
 

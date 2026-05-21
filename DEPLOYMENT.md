@@ -35,6 +35,17 @@ Old rooms are removed when the app starts. Set this to a larger number if you wa
 
 Keep `SUPABASE_SERVICE_ROLE_KEY` only in Render environment variables. Do not place it in frontend code, README examples, screenshots, or GitHub issues.
 
+## Text Size Limits
+
+The default page limit is:
+
+```text
+MAX_PAGE_CHARS=200000
+MAX_FRAME_BYTES=1048576
+```
+
+Raise both values if you need to paste longer transcripts. `MAX_FRAME_BYTES` is a byte limit for one WebSocket message, so set it to at least `MAX_PAGE_CHARS * 4 + 16384` when `MAX_PAGE_CHARS` is increased.
+
 ## Verify
 
 After deploy:

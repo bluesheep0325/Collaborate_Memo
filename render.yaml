@@ -23,3 +23,7 @@ services:
         value: memo_rooms
       - key: SUPABASE_RETENTION_DAYS
         value: 7
+      - key: MAX_PAGE_CHARS
+        value: 200000
+      - key: MAX_FRAME_BYTES
+        value: 1048576

@@ -36,7 +36,9 @@ const state = {
   heartbeatTimer: null,
   reconnectAttempts: 0,
   joined: false,
-  leaving: false
+  leaving: false,
+  forceNextInputReplace: false,
+  maxPageChars: 0
 };
 
 const params = new URLSearchParams(location.search);
@@ -112,10 +114,12 @@ memoInput.addEventListener("input", (event) => {
 
   const nextValue = memoInput.value;
   const shouldReplaceText =
+    state.forceNextInputReplace ||
     event.inputType === "insertFromPaste" ||
     event.inputType === "insertFromDrop" ||
     event.inputType === "deleteByCut";
   if (shouldReplaceText) {
+    state.forceNextInputReplace = false;
     replacePageText(page, nextValue);
     return;
   }
@@ -140,9 +144,11 @@ memoInput.addEventListener("input", (event) => {
 });
 
 memoInput.addEventListener("paste", () => {
+  state.forceNextInputReplace = true;
   setTimeout(() => {
     const page = currentPage();
-    if (page && memoInput.value !== state.lastValue) {
+    if (state.forceNextInputReplace && page && memoInput.value !== state.lastValue) {
+      state.forceNextInputReplace = false;
       replacePageText(page, memoInput.value);
     }
   }, 0);
@@ -216,6 +222,7 @@ function handleMessage(message) {
     state.activePageId = message.room.activePageId;
     state.pages = message.room.pages;
     state.users = new Map(message.room.users.map((user) => [user.id, user]));
+    state.maxPageChars = Number(message.limits?.maxPageChars) || 0;
     state.joined = true;
     state.reconnectAttempts = 0;
     startHeartbeat();
@@ -585,15 +592,20 @@ function sendCursor() {
 }
 
 function replacePageText(page, text) {
-  page.text = text;
-  state.lastValue = text;
+  const nextText = state.maxPageChars > 0 ? text.slice(0, state.maxPageChars) : text;
+  if (nextText !== text) {
+    memoInput.value = nextText;
+  }
+
+  page.text = nextText;
+  state.lastValue = nextText;
   page.version += 1;
   state.localSequence += 1;
 
   send({
     type: "page-replace",
     pageId: page.id,
-    text,
+    text: nextText,
     baseVersion: page.version - 1,
     sequence: state.localSequence,
     cursor: localCursorPayload()

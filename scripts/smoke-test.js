@@ -33,6 +33,8 @@ try {
   await waitForHttp();
   const health = await fetch(`${baseUrl}/healthz`).then((response) => response.json());
   assert(health.ok === true, "health endpoint should report ok");
+  assert(health.limits.maxPageChars >= 200000, "health endpoint should expose page character limit");
+  assert(health.limits.maxFrameBytes > 128 * 1024, "websocket frame limit should allow large paste payloads");
 
   const html = await fetch(baseUrl).then((response) => response.text());
   assert(html.includes("Collaborate Memo"), "index page should load");
@@ -69,6 +71,19 @@ try {
   );
   const replaceMessage = await bobReplace;
   assert(replaceMessage.text === "pasted text", "full page replace should reach the other user");
+
+  const largePaste = "x".repeat(160000);
+  const bobLargeReplace = waitForMessage(bob.socket, (message) => message.type === "page-replace", "bob large page-replace");
+  alice.socket.send(
+    JSON.stringify({
+      type: "page-replace",
+      pageId,
+      text: largePaste,
+      cursor: { index: largePaste.length, start: largePaste.length, end: largePaste.length }
+    })
+  );
+  const largeReplaceMessage = await bobLargeReplace;
+  assert(largeReplaceMessage.text.length === largePaste.length, "large paste should not be truncated");
 
   const aliceCursor = waitForMessage(alice.socket, (message) => message.type === "cursor", "alice cursor");
   bob.socket.send(JSON.stringify({ type: "cursor", pageId, index: 5, start: 1, end: 5 }));
