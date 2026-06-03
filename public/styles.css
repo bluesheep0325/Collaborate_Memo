@@ -217,6 +217,41 @@ textarea:focus {
   flex-wrap: wrap;
 }
 
+.side-tool-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.side-tool-button:hover:not(:disabled) {
+  border-color: #9ccbd6;
+  background: var(--accent-soft);
+}
+
+.side-tool-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.danger-button-inline {
+  color: #b91c1c;
+}
+
+.danger-button-inline:hover:not(:disabled) {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
 .muted,
 .status {
   color: var(--muted);
@@ -404,10 +439,6 @@ textarea:focus {
   justify-content: flex-end;
   gap: 10px;
   min-width: 0;
-}
-
-#previewButton {
-  width: 32px;
 }
 
 .user-list {

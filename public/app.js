@@ -840,8 +840,8 @@ function updateActionButtons() {
     state.deletedPageCount > 0 ? `${state.deletedPageCount}件の削除済みページを復元できます` : "復元できるページはありません";
   duplicatePageButton.disabled = !canEdit() || !currentPage();
   previewButton.disabled = !state.joined;
-  previewButton.textContent = state.previewMode ? "E" : "P";
-  previewButton.title = state.previewMode ? "編集に戻る" : "Preview";
+  previewButton.textContent = state.previewMode ? "編集" : "表示";
+  previewButton.title = state.previewMode ? "編集に戻る" : "プレビュー";
   previewButton.setAttribute("aria-label", previewButton.title);
 }
 
@@ -954,8 +954,8 @@ function recoveryTitle(title) {
 function renderPreview() {
   editorFrame.classList.toggle("is-preview", state.previewMode);
   previewPane.classList.toggle("hidden", !state.previewMode);
-  previewButton.textContent = state.previewMode ? "E" : "P";
-  previewButton.title = state.previewMode ? "編集に戻る" : "Preview";
+  previewButton.textContent = state.previewMode ? "編集" : "表示";
+  previewButton.title = state.previewMode ? "編集に戻る" : "プレビュー";
   previewButton.setAttribute("aria-label", previewButton.title);
   if (!state.previewMode) return;
 
