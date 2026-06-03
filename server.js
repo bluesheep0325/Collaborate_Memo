@@ -3,7 +3,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
-import { dirname, extname, join, normalize } from "node:path";
+import { dirname, extname, isAbsolute, join, normalize, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -23,6 +23,8 @@ const maxUsersPerRoom = Number(process.env.MAX_USERS_PER_ROOM || 10);
 const maxPagesPerRoom = Number(process.env.MAX_PAGES_PER_ROOM || 50);
 const maxPageChars = Number(process.env.MAX_PAGE_CHARS || 200000);
 const maxFrameBytes = Number(process.env.MAX_FRAME_BYTES || Math.max(1024 * 1024, maxPageChars * 4 + 16384));
+const maxMessagesPerMinute = Number(process.env.MAX_MESSAGES_PER_MINUTE || 240);
+const maxJoinAttemptsPerMinute = Number(process.env.MAX_JOIN_ATTEMPTS_PER_MINUTE || 30);
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -42,11 +44,13 @@ const securityHeaders = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
   "referrer-policy": "no-referrer",
-  "permissions-policy": "camera=(), microphone=(), geolocation=()"
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+  "content-security-policy": "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 };
 
 const rooms = new Map();
 const sockets = new Set();
+const joinAttempts = new Map();
 const colorPalette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
 
 function createPage(title = "Page 1") {
@@ -67,7 +71,8 @@ function getRoom(roomId) {
       id: roomId,
       pages: [firstPage],
       activePageId: firstPage.id,
-      users: new Map()
+      users: new Map(),
+      ownerId: ""
     });
     scheduleSave();
   }
@@ -159,7 +164,8 @@ async function loadRooms() {
         id: roomData.id,
         pages,
         activePageId: roomData.activePageId || pages[0].id,
-        users: new Map()
+        users: new Map(),
+        ownerId: ""
       });
     }
   } catch (error) {
@@ -219,7 +225,8 @@ async function loadRoomsFromSupabase() {
       id: row.room_id,
       pages,
       activePageId: row.active_page_id || pages[0].id,
-      users: new Map()
+      users: new Map(),
+      ownerId: ""
     });
   }
 }
@@ -353,10 +360,8 @@ function serveStatic(request, response) {
     return;
   }
 
-  const requestedPath = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  const resolvedPath = normalize(join(publicDir, requestedPath));
-
-  if (!resolvedPath.startsWith(publicDir) || !existsSync(resolvedPath)) {
+  const resolvedPath = resolvePublicPath(url.pathname);
+  if (!resolvedPath || !existsSync(resolvedPath)) {
     response.writeHead(404, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
     response.end("Not found");
     return;
@@ -370,6 +375,20 @@ function serveStatic(request, response) {
     })
   );
   createReadStream(resolvedPath).pipe(response);
+}
+
+function resolvePublicPath(pathname) {
+  let requestedPath;
+  try {
+    requestedPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+
+  const resolvedPath = normalize(join(publicDir, requestedPath));
+  const publicRelativePath = relative(publicDir, resolvedPath);
+  if (publicRelativePath.startsWith("..") || isAbsolute(publicRelativePath)) return null;
+  return resolvedPath;
 }
 
 const server = createServer(serveStatic);
@@ -408,11 +427,14 @@ server.on("upgrade", (request, socket) => {
   );
 
   socket.id = randomUUID();
+  socket.ip = request.socket.remoteAddress || "unknown";
   socket.wsReadyState = "open";
   socket.buffer = Buffer.alloc(0);
   socket.fragmentOpcode = 0;
   socket.fragmentChunks = [];
   socket.fragmentBytes = 0;
+  socket.rateWindowStartedAt = Date.now();
+  socket.rateCount = 0;
   socket.send = (message) => writeFrame(socket, message);
   sockets.add(socket);
 
@@ -571,6 +593,11 @@ function handleMessage(socket, raw) {
     return;
   }
 
+  if (isSocketRateLimited(socket)) {
+    closeWebSocket(socket, 1008, "rate limit exceeded");
+    return;
+  }
+
   if (process.env.DEBUG_WS) console.error("Websocket message:", message.type);
 
   if (message.type === "join") {
@@ -593,6 +620,12 @@ function handleMessage(socket, raw) {
 }
 
 function joinRoom(socket, message) {
+  if (isJoinRateLimited(socket.ip)) {
+    socket.send(JSON.stringify({ type: "join-error", reason: "rate-limited" }));
+    setTimeout(() => socket.end(), 50);
+    return;
+  }
+
   if (!passwordMatches(message.password)) {
     socket.send(JSON.stringify({ type: "join-error", reason: "invalid-password" }));
     setTimeout(() => socket.end(), 50);
@@ -612,11 +645,15 @@ function joinRoom(socket, message) {
     return;
   }
 
+  if (!room.ownerId || room.users.size === 0) {
+    room.ownerId = socket.id;
+  }
   const colorIndex = room.users.size % colorPalette.length;
   const user = {
     id: socket.id,
     name: String(message.userName || "Guest").trim().slice(0, 24) || "Guest",
     color: colorPalette[colorIndex],
+    role: socket.id === room.ownerId ? "owner" : "editor",
     cursor: { pageId: room.activePageId, index: 0, start: 0, end: 0 },
     activePageId: room.activePageId
   };
@@ -730,7 +767,10 @@ function handleCursor(socket, room, message) {
 }
 
 function handleAddPage(socket, room, message) {
-  if (room.pages.length >= maxPagesPerRoom) return;
+  if (room.pages.length >= maxPagesPerRoom) {
+    socket.send(JSON.stringify({ type: "action-error", action: "add-page", reason: "page-limit" }));
+    return;
+  }
 
   const page = createPage(String(message.title || `Page ${room.pages.length + 1}`).slice(0, 40));
   room.pages.push(page);
@@ -745,7 +785,14 @@ function handleAddPage(socket, room, message) {
 }
 
 function handleDeletePage(socket, room, message) {
-  if (room.pages.length <= 1) return;
+  if (room.ownerId !== socket.id) {
+    socket.send(JSON.stringify({ type: "action-error", action: "delete-page", reason: "owner-only" }));
+    return;
+  }
+  if (room.pages.length <= 1) {
+    socket.send(JSON.stringify({ type: "action-error", action: "delete-page", reason: "last-page" }));
+    return;
+  }
 
   const pageIndex = room.pages.findIndex((item) => item.id === message.pageId);
   if (pageIndex === -1) return;
@@ -806,6 +853,14 @@ function leave(socket) {
   const room = rooms.get(socket.roomId);
   if (!room) return;
   room.users.delete(socket.id);
+  if (room.ownerId === socket.id) {
+    const nextOwner = room.users.values().next().value;
+    room.ownerId = nextOwner?.id || "";
+    if (nextOwner) {
+      nextOwner.role = "owner";
+      broadcast(room, { type: "user-updated", user: nextOwner });
+    }
+  }
   broadcast(room, { type: "user-left", userId: socket.id });
 
   if (roomTtlMs > 0 && room.users.size === 0) {
@@ -818,6 +873,30 @@ function leave(socket) {
       }
     }, roomTtlMs);
   }
+}
+
+function isSocketRateLimited(socket) {
+  if (!Number.isFinite(maxMessagesPerMinute) || maxMessagesPerMinute <= 0) return false;
+  const now = Date.now();
+  if (now - socket.rateWindowStartedAt > 60_000) {
+    socket.rateWindowStartedAt = now;
+    socket.rateCount = 0;
+  }
+  socket.rateCount += 1;
+  return socket.rateCount > maxMessagesPerMinute;
+}
+
+function isJoinRateLimited(ip) {
+  if (!Number.isFinite(maxJoinAttemptsPerMinute) || maxJoinAttemptsPerMinute <= 0) return false;
+  const now = Date.now();
+  const bucket = joinAttempts.get(ip) || { startedAt: now, count: 0 };
+  if (now - bucket.startedAt > 60_000) {
+    bucket.startedAt = now;
+    bucket.count = 0;
+  }
+  bucket.count += 1;
+  joinAttempts.set(ip, bucket);
+  return bucket.count > maxJoinAttemptsPerMinute;
 }
 
 await loadRooms();

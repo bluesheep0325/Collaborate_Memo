@@ -34,6 +34,7 @@ const state = {
   localSequence: 0,
   reconnectTimer: null,
   heartbeatTimer: null,
+  noticeTimer: null,
   reconnectAttempts: 0,
   joined: false,
   leaving: false,
@@ -70,6 +71,11 @@ deletePageButton.addEventListener("click", () => {
   if (!canEdit()) return;
   const page = currentPage();
   if (!page || state.pages.length <= 1) return;
+  if (!isOwner()) {
+    showNotice("ページ削除はルーム所有者のみ実行できます。", "error");
+    return;
+  }
+  if (!confirm(`「${page.title}」を削除しますか？この操作は元に戻せません。`)) return;
   send({ type: "delete-page", pageId: page.id });
 });
 
@@ -291,7 +297,8 @@ function handleMessage(message) {
     const errorLabels = {
       "invalid-password": "合言葉が違います。",
       "room-full": "このルームは満員です。",
-      "server-full": "作成できるルーム数の上限に達しています。"
+      "server-full": "作成できるルーム数の上限に達しています。",
+      "rate-limited": "入室試行が多すぎます。少し待ってください。"
     };
     entryError.textContent = errorLabels[message.reason] || "入室できませんでした。";
     setStatus("offline");
@@ -306,6 +313,12 @@ function handleMessage(message) {
     state.users.delete(message.userId);
     renderUsers();
     renderCursors();
+  }
+
+  if (message.type === "user-updated") {
+    state.users.set(message.user.id, message.user);
+    renderUsers();
+    renderPages();
   }
 
   if (message.type === "page-op") {
@@ -357,6 +370,15 @@ function handleMessage(message) {
       }
       renderPages();
     }
+  }
+
+  if (message.type === "action-error") {
+    const labels = {
+      "page-limit": "ページ数の上限に達しています。",
+      "owner-only": "この操作はルーム所有者のみ実行できます。",
+      "last-page": "最後のページは削除できません。"
+    };
+    showNotice(labels[message.reason] || "操作を完了できませんでした。", "error");
   }
 }
 
@@ -457,8 +479,13 @@ function renderPages() {
       return button;
     })
   );
-  deletePageButton.disabled = !canEdit() || state.pages.length <= 1;
-  deletePageButton.title = state.pages.length <= 1 ? "最後のページは削除できません" : "現在のページを削除";
+  deletePageButton.disabled = !canEdit() || !isOwner() || state.pages.length <= 1;
+  deletePageButton.title =
+    state.pages.length <= 1
+      ? "最後のページは削除できません"
+      : isOwner()
+        ? "現在のページを削除"
+        : "ページ削除はルーム所有者のみ実行できます";
   addPageButton.disabled = !canEdit();
   editTitleButton.disabled = !canEdit();
 }
@@ -476,7 +503,10 @@ function renderUsers() {
       dot.className = "user-dot";
       const name = document.createElement("span");
       name.className = "user-name";
-      name.textContent = user.id === state.selfId ? `${user.name} (自分)` : user.name;
+      const suffixes = [];
+      if (user.id === state.selfId) suffixes.push("自分");
+      if (user.role === "owner") suffixes.push("所有者");
+      name.textContent = suffixes.length ? `${user.name} (${suffixes.join(", ")})` : user.name;
 
       pill.append(dot, name);
       return pill;
@@ -650,6 +680,10 @@ function canEdit() {
   return state.joined && state.socket?.readyState === WebSocket.OPEN;
 }
 
+function isOwner() {
+  return state.users.get(state.selfId)?.role === "owner";
+}
+
 function setEditingEnabled(enabled) {
   memoInput.readOnly = !enabled;
   addPageButton.disabled = !enabled;
@@ -657,7 +691,16 @@ function setEditingEnabled(enabled) {
   if (!enabled) {
     endTitleEditMode();
   }
-  deletePageButton.disabled = !enabled || state.pages.length <= 1;
+  deletePageButton.disabled = !enabled || !isOwner() || state.pages.length <= 1;
+}
+
+function showNotice(text, status = "error") {
+  clearTimeout(state.noticeTimer);
+  statusText.textContent = text;
+  statusText.className = `status is-${status}`;
+  state.noticeTimer = setTimeout(() => {
+    setStatus(canEdit() ? "online" : "offline");
+  }, 3500);
 }
 
 function scheduleReconnect() {

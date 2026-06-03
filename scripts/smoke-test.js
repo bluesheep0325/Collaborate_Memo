@@ -102,8 +102,13 @@ try {
   const renameMessage = await aliceRename;
   assert(renameMessage.title === "Renamed page", "renamed page title should reach the other user");
 
-  const aliceDelete = waitForMessage(alice.socket, (message) => message.type === "page-deleted", "alice page-deleted");
+  const bobDenied = waitForMessage(bob.socket, (message) => message.type === "action-error", "bob delete denied");
   bob.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
+  const deniedMessage = await bobDenied;
+  assert(deniedMessage.reason === "owner-only", "non-owner page delete should be denied");
+
+  const aliceDelete = waitForMessage(alice.socket, (message) => message.type === "page-deleted", "alice page-deleted");
+  alice.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
   const deleteMessage = await aliceDelete;
   assert(deleteMessage.pageId === pageMessage.page.id, "deleted page should reach the other user");
 
