@@ -818,7 +818,7 @@ function handleDuplicatePage(socket, room, message) {
   const source = room.pages.find((item) => item.id === message.pageId);
   if (!source) return;
 
-  const page = createPage(normalizePageTitle(`${source.title} copy`, "Copied page"));
+  const page = createPage(normalizePageTitle(`${source.title} コピー`, "Copied page"));
   page.text = source.text;
   page.version = source.version;
   const sourceIndex = room.pages.findIndex((item) => item.id === source.id);
