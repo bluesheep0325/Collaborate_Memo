@@ -594,6 +594,21 @@ function handlePageReplace(socket, room, message) {
   const page = room.pages.find((item) => item.id === message.pageId);
   if (!page || typeof message.text !== "string") return;
 
+  const baseVersion = Number(message.baseVersion);
+  if (Number.isFinite(baseVersion) && baseVersion < page.version) {
+    socket.send(
+      JSON.stringify({
+        type: "page-rejected",
+        reason: "stale-replace",
+        pageId: page.id,
+        text: page.text,
+        version: page.version,
+        sequence: message.sequence
+      })
+    );
+    return;
+  }
+
   page.text = message.text.slice(0, maxPageChars);
   page.version += 1;
   page.history = [];
@@ -633,7 +648,12 @@ function handleAddPage(socket, room, message) {
   room.pages.push(page);
   room.activePageId = page.id;
   scheduleSave();
-  broadcast(room, { type: "page-added", page: { id: page.id, title: page.title, text: "", version: 0 } });
+  broadcast(room, {
+    type: "page-added",
+    page: { id: page.id, title: page.title, text: "", version: 0 },
+    requestId: typeof message.requestId === "string" ? message.requestId.slice(0, 80) : "",
+    userId: socket.id
+  });
 }
 
 function handleDeletePage(socket, room, message) {

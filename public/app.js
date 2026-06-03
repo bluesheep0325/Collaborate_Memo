@@ -40,6 +40,8 @@ const state = {
   forceNextInputReplace: false,
   composing: false,
   pendingOps: new Map(),
+  pendingRecoveries: new Map(),
+  recoveryCounter: 0,
   maxPageChars: 0
 };
 
@@ -60,10 +62,12 @@ joinForm.addEventListener("submit", (event) => {
 });
 
 addPageButton.addEventListener("click", () => {
+  if (!canEdit()) return;
   send({ type: "add-page", title: `Page ${state.pages.length + 1}` });
 });
 
 deletePageButton.addEventListener("click", () => {
+  if (!canEdit()) return;
   const page = currentPage();
   if (!page || state.pages.length <= 1) return;
   send({ type: "delete-page", pageId: page.id });
@@ -72,6 +76,7 @@ deletePageButton.addEventListener("click", () => {
 leaveButton.addEventListener("click", leaveRoom);
 
 editTitleButton.addEventListener("click", () => {
+  if (!canEdit()) return;
   if (pageTitleInput.readOnly) {
     beginTitleEdit();
   } else {
@@ -256,6 +261,7 @@ function send(message) {
 
 function handleMessage(message) {
   if (message.type === "joined") {
+    const drafts = collectUnsyncedDrafts();
     state.selfId = message.selfId;
     state.activePageId = message.room.activePageId;
     state.pages = message.room.pages;
@@ -272,6 +278,7 @@ function handleMessage(message) {
     setStatus("online");
     switchPage(state.activePageId, false);
     renderAll();
+    recoverUnsyncedDrafts(drafts);
   }
 
   if (message.type === "join-error") {
@@ -309,6 +316,10 @@ function handleMessage(message) {
     receivePageReplace(message);
   }
 
+  if (message.type === "page-rejected") {
+    receivePageRejected(message);
+  }
+
   if (message.type === "cursor") {
     const user = state.users.get(message.userId);
     if (user) {
@@ -322,6 +333,7 @@ function handleMessage(message) {
     state.pages.push(message.page);
     state.activePageId = message.page.id;
     switchPage(message.page.id, false);
+    finishPendingRecovery(message);
     renderAll();
   }
 
@@ -401,6 +413,33 @@ function receivePageReplace(message) {
   }
 }
 
+function receivePageRejected(message) {
+  const page = state.pages.find((item) => item.id === message.pageId);
+  if (!page) return;
+
+  const draft = {
+    sourcePageId: page.id,
+    title: recoveryTitle(page.title),
+    text: page.text
+  };
+
+  forgetPendingOp(page.id, message.sequence);
+  page.text = message.text;
+  page.version = Number(message.version) || 0;
+  state.lastValue = page.id === state.activePageId ? message.text : state.lastValue;
+
+  if (page.id === state.activePageId) {
+    const cursorPosition = Math.min(memoInput.selectionStart, page.text.length);
+    memoInput.value = page.text;
+    memoInput.setSelectionRange(cursorPosition, cursorPosition);
+    renderCursors();
+  }
+
+  if (draft.text !== page.text) {
+    queueRecoveryDraft(draft);
+  }
+}
+
 function renderAll() {
   renderPages();
   renderUsers();
@@ -418,8 +457,10 @@ function renderPages() {
       return button;
     })
   );
-  deletePageButton.disabled = state.pages.length <= 1;
+  deletePageButton.disabled = !canEdit() || state.pages.length <= 1;
   deletePageButton.title = state.pages.length <= 1 ? "最後のページは削除できません" : "現在のページを削除";
+  addPageButton.disabled = !canEdit();
+  editTitleButton.disabled = !canEdit();
 }
 
 function renderUsers() {
@@ -549,7 +590,7 @@ function currentPage() {
 
 function beginTitleEdit() {
   const page = currentPage();
-  if (!page) return;
+  if (!page || !canEdit()) return;
 
   state.titleBeforeEdit = page.title;
   pageTitleInput.readOnly = false;
@@ -602,6 +643,21 @@ function setStatus(status) {
 
   statusText.textContent = labels[status] || labels.offline;
   statusText.className = `status is-${status}`;
+  setEditingEnabled(status === "online");
+}
+
+function canEdit() {
+  return state.joined && state.socket?.readyState === WebSocket.OPEN;
+}
+
+function setEditingEnabled(enabled) {
+  memoInput.readOnly = !enabled;
+  addPageButton.disabled = !enabled;
+  editTitleButton.disabled = !enabled;
+  if (!enabled) {
+    endTitleEditMode();
+  }
+  deletePageButton.disabled = !enabled || state.pages.length <= 1;
 }
 
 function scheduleReconnect() {
@@ -660,6 +716,53 @@ function replacePageText(page, text) {
     cursor: localCursorPayload()
   });
   sendCursor();
+}
+
+function collectUnsyncedDrafts() {
+  const drafts = [];
+  for (const [pageId, pending] of state.pendingOps) {
+    if (!pending.length) continue;
+    const page = state.pages.find((item) => item.id === pageId);
+    if (!page) continue;
+    drafts.push({
+      sourcePageId: page.id,
+      title: recoveryTitle(page.title),
+      text: page.text
+    });
+  }
+  return drafts;
+}
+
+function recoverUnsyncedDrafts(drafts) {
+  for (const draft of drafts) {
+    const serverPage = state.pages.find((page) => page.id === draft.sourcePageId);
+    if (!serverPage || serverPage.text !== draft.text) {
+      queueRecoveryDraft(draft);
+    }
+  }
+}
+
+function queueRecoveryDraft(draft) {
+  if (!draft.text) return;
+  const requestId = `recovery-${Date.now()}-${state.recoveryCounter}`;
+  state.recoveryCounter += 1;
+  state.pendingRecoveries.set(requestId, draft);
+  send({ type: "add-page", title: draft.title, requestId });
+}
+
+function finishPendingRecovery(message) {
+  if (!message.requestId || message.userId !== state.selfId) return;
+  const draft = state.pendingRecoveries.get(message.requestId);
+  if (!draft) return;
+  state.pendingRecoveries.delete(message.requestId);
+  const page = state.pages.find((item) => item.id === message.page.id);
+  if (!page) return;
+  switchPage(page.id, false);
+  replacePageText(page, draft.text);
+}
+
+function recoveryTitle(title) {
+  return normalizeTitle(`${title || "Untitled"} recovery`, "Recovered memo");
 }
 
 function localCursorPayload() {
