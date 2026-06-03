@@ -4,6 +4,14 @@ Browser-based realtime collaborative memo app for small rooms.
 
 Reloading the page rejoins the current room in the same browser tab. Use `退出` to leave the room and clear that tab session.
 
+## Features
+
+- Realtime multi-user memo editing with remote cursors and selections.
+- Multiple pages per room, page search, title editing, and owner-only page deletion.
+- Deleted page restore for recent accidental deletes.
+- Current-page TXT export plus all-page JSON export/import.
+- Share-link copy with the current room ID.
+
 ## Start
 
 ```powershell
@@ -32,6 +40,8 @@ SUPABASE_SERVICE_ROLE_KEY=<server-side service role key>
 SUPABASE_RETENTION_DAYS=7
 MAX_PAGE_CHARS=200000
 MAX_FRAME_BYTES=1048576
+MAX_MESSAGES_PER_MINUTE=240
+MAX_JOIN_ATTEMPTS_PER_MINUTE=30
 ```
 
 If `ROOM_PASSWORD` is empty, anyone who can access the URL can enter a room by guessing or knowing the room ID.

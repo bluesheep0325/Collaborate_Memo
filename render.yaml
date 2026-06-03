@@ -27,3 +27,7 @@ services:
         value: 200000
       - key: MAX_FRAME_BYTES
         value: 1048576
+      - key: MAX_MESSAGES_PER_MINUTE
+        value: 240
+      - key: MAX_JOIN_ATTEMPTS_PER_MINUTE
+        value: 30

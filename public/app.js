@@ -8,13 +8,19 @@ const entryError = document.querySelector("#entryError");
 const roomLabel = document.querySelector("#roomLabel");
 const pageList = document.querySelector("#pageList");
 const addPageButton = document.querySelector("#addPageButton");
+const pageSearchInput = document.querySelector("#pageSearchInput");
 const pageTitleInput = document.querySelector("#pageTitleInput");
 const editTitleButton = document.querySelector("#editTitleButton");
 const statusText = document.querySelector("#statusText");
 const userList = document.querySelector("#userList");
+const shareButton = document.querySelector("#shareButton");
+const restorePageButton = document.querySelector("#restorePageButton");
+const importButton = document.querySelector("#importButton");
+const exportButton = document.querySelector("#exportButton");
 const deletePageButton = document.querySelector("#deletePageButton");
 const saveButton = document.querySelector("#saveButton");
 const leaveButton = document.querySelector("#leaveButton");
+const importFileInput = document.querySelector("#importFileInput");
 const memoInput = document.querySelector("#memoInput");
 const cursorLayer = document.querySelector("#cursorLayer");
 const sessionKey = "collaborate-memo-session";
@@ -28,6 +34,8 @@ const state = {
   activePageId: "",
   pages: [],
   users: new Map(),
+  deletedPageCount: 0,
+  searchQuery: "",
   lastValue: "",
   titleTimer: null,
   titleBeforeEdit: "",
@@ -80,6 +88,46 @@ deletePageButton.addEventListener("click", () => {
 });
 
 leaveButton.addEventListener("click", leaveRoom);
+
+pageSearchInput.addEventListener("input", () => {
+  state.searchQuery = pageSearchInput.value.trim().toLowerCase();
+  renderPages();
+});
+
+shareButton.addEventListener("click", async () => {
+  if (!state.roomId) return;
+  const url = new URL(location.href);
+  url.searchParams.set("room", state.roomId);
+  try {
+    await navigator.clipboard.writeText(url.href);
+    showNotice("共有リンクをコピーしました。", "online");
+  } catch {
+    prompt("共有リンク", url.href);
+  }
+});
+
+restorePageButton.addEventListener("click", () => {
+  if (!canEdit()) return;
+  if (!isOwner()) {
+    showNotice("ページ復元はルーム所有者のみ実行できます。", "error");
+    return;
+  }
+  send({ type: "restore-page" });
+});
+
+exportButton.addEventListener("click", exportAllPages);
+
+importButton.addEventListener("click", () => {
+  if (!canEdit()) return;
+  importFileInput.click();
+});
+
+importFileInput.addEventListener("change", async () => {
+  const file = importFileInput.files?.[0];
+  importFileInput.value = "";
+  if (!file) return;
+  await importPagesFromFile(file);
+});
 
 editTitleButton.addEventListener("click", () => {
   if (!canEdit()) return;
@@ -272,6 +320,7 @@ function handleMessage(message) {
     state.activePageId = message.room.activePageId;
     state.pages = message.room.pages;
     state.users = new Map(message.room.users.map((user) => [user.id, user]));
+    state.deletedPageCount = Number(message.room.deletedPageCount) || 0;
     state.pendingOps = new Map();
     state.maxPageChars = Number(message.limits?.maxPageChars) || 0;
     state.joined = true;
@@ -352,6 +401,7 @@ function handleMessage(message) {
 
   if (message.type === "page-deleted") {
     state.pages = state.pages.filter((page) => page.id !== message.pageId);
+    state.deletedPageCount = Number(message.deletedPageCount) || state.deletedPageCount;
     if (state.pages.length === 0) return;
     const nextPageId = state.pages.some((page) => page.id === state.activePageId)
       ? state.activePageId
@@ -372,11 +422,19 @@ function handleMessage(message) {
     }
   }
 
+  if (message.type === "page-restored") {
+    state.pages.push(message.page);
+    state.deletedPageCount = Number(message.deletedPageCount) || 0;
+    switchPage(message.page.id, false);
+    renderAll();
+  }
+
   if (message.type === "action-error") {
     const labels = {
       "page-limit": "ページ数の上限に達しています。",
       "owner-only": "この操作はルーム所有者のみ実行できます。",
-      "last-page": "最後のページは削除できません。"
+      "last-page": "最後のページは削除できません。",
+      "nothing-to-restore": "復元できるページがありません。"
     };
     showNotice(labels[message.reason] || "操作を完了できませんでした。", "error");
   }
@@ -469,8 +527,11 @@ function renderAll() {
 }
 
 function renderPages() {
+  const visiblePages = state.searchQuery
+    ? state.pages.filter((page) => `${page.title}\n${page.text}`.toLowerCase().includes(state.searchQuery))
+    : state.pages;
   pageList.replaceChildren(
-    ...state.pages.map((page) => {
+    ...visiblePages.map((page) => {
       const button = document.createElement("button");
       button.className = `page-item${page.id === state.activePageId ? " active" : ""}`;
       button.type = "button";
@@ -488,6 +549,7 @@ function renderPages() {
         : "ページ削除はルーム所有者のみ実行できます";
   addPageButton.disabled = !canEdit();
   editTitleButton.disabled = !canEdit();
+  updateActionButtons();
 }
 
 function renderUsers() {
@@ -688,10 +750,12 @@ function setEditingEnabled(enabled) {
   memoInput.readOnly = !enabled;
   addPageButton.disabled = !enabled;
   editTitleButton.disabled = !enabled;
+  importButton.disabled = !enabled;
   if (!enabled) {
     endTitleEditMode();
   }
   deletePageButton.disabled = !enabled || !isOwner() || state.pages.length <= 1;
+  updateActionButtons();
 }
 
 function showNotice(text, status = "error") {
@@ -701,6 +765,17 @@ function showNotice(text, status = "error") {
   state.noticeTimer = setTimeout(() => {
     setStatus(canEdit() ? "online" : "offline");
   }, 3500);
+}
+
+function updateActionButtons() {
+  const joined = state.joined && state.pages.length > 0;
+  shareButton.disabled = !state.roomId;
+  exportButton.disabled = !joined;
+  saveButton.disabled = !joined;
+  importButton.disabled = !canEdit();
+  restorePageButton.disabled = !canEdit() || !isOwner() || state.deletedPageCount <= 0;
+  restorePageButton.title =
+    state.deletedPageCount > 0 ? `${state.deletedPageCount}件の削除済みページを復元できます` : "復元できるページはありません";
 }
 
 function scheduleReconnect() {
@@ -786,7 +861,7 @@ function recoverUnsyncedDrafts(drafts) {
 }
 
 function queueRecoveryDraft(draft) {
-  if (!draft.text) return;
+  if (draft.text == null) return;
   const requestId = `recovery-${Date.now()}-${state.recoveryCounter}`;
   state.recoveryCounter += 1;
   state.pendingRecoveries.set(requestId, draft);
@@ -806,6 +881,59 @@ function finishPendingRecovery(message) {
 
 function recoveryTitle(title) {
   return normalizeTitle(`${title || "Untitled"} recovery`, "Recovered memo");
+}
+
+function exportAllPages() {
+  if (!state.pages.length) return;
+  const payload = {
+    app: "Collaborate Memo",
+    exportedAt: new Date().toISOString(),
+    roomId: state.roomId,
+    activePageId: state.activePageId,
+    pages: state.pages.map(({ title, text }) => ({ title, text }))
+  };
+  downloadText(`${safeFileName(state.roomId || "memo")}.json`, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+}
+
+async function importPagesFromFile(file) {
+  if (!canEdit()) return;
+  const text = await file.text();
+  let importedPages = null;
+
+  try {
+    const data = JSON.parse(text);
+    if (Array.isArray(data.pages)) {
+      importedPages = data.pages.map((page, index) => ({
+        title: normalizeTitle(page.title, `Imported ${index + 1}`),
+        text: String(page.text || "")
+      }));
+    }
+  } catch {
+    importedPages = null;
+  }
+
+  if (!importedPages) {
+    importedPages = [{ title: normalizeTitle(file.name.replace(/\.[^.]+$/, ""), "Imported memo"), text }];
+  }
+
+  for (const page of importedPages.slice(0, 20)) {
+    queueRecoveryDraft(page);
+  }
+  showNotice(`${Math.min(importedPages.length, 20)}ページを読み込みました。`, "online");
+}
+
+function downloadText(fileName, text, type) {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function safeFileName(name) {
+  return String(name || "memo").replace(/[\\/:*?"<>|]/g, "_") || "memo";
 }
 
 function localCursorPayload() {
@@ -857,6 +985,9 @@ function leaveRoom() {
   state.activePageId = "";
   state.pages = [];
   state.users = new Map();
+  state.deletedPageCount = 0;
+  state.searchQuery = "";
+  pageSearchInput.value = "";
   state.lastValue = "";
   state.composing = false;
   state.pendingOps = new Map();

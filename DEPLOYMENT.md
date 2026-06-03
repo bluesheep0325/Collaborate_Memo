@@ -42,6 +42,8 @@ The default page limit is:
 ```text
 MAX_PAGE_CHARS=200000
 MAX_FRAME_BYTES=1048576
+MAX_MESSAGES_PER_MINUTE=240
+MAX_JOIN_ATTEMPTS_PER_MINUTE=30
 ```
 
 Raise both values if you need to paste longer transcripts. `MAX_FRAME_BYTES` is a byte limit for one WebSocket message, so set it to at least `MAX_PAGE_CHARS * 4 + 16384` when `MAX_PAGE_CHARS` is increased.

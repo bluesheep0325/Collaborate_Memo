@@ -72,7 +72,8 @@ function getRoom(roomId) {
       pages: [firstPage],
       activePageId: firstPage.id,
       users: new Map(),
-      ownerId: ""
+      ownerId: "",
+      deletedPages: []
     });
     scheduleSave();
   }
@@ -121,7 +122,8 @@ function serializeRoom(room) {
     id: room.id,
     activePageId: room.activePageId,
     pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version })),
-    users: [...room.users.values()]
+    users: [...room.users.values()],
+    deletedPageCount: room.deletedPages?.length || 0
   };
 }
 
@@ -133,7 +135,8 @@ function serializeRoomForStorage(room) {
   return {
     id: room.id,
     activePageId: room.activePageId,
-    pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version }))
+    pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version })),
+    deletedPages: (room.deletedPages || []).map(({ id, title, text, version }) => ({ id, title, text, version }))
   };
 }
 
@@ -165,7 +168,8 @@ async function loadRooms() {
         pages,
         activePageId: roomData.activePageId || pages[0].id,
         users: new Map(),
-        ownerId: ""
+        ownerId: "",
+        deletedPages: Array.isArray(roomData.deletedPages) ? roomData.deletedPages.slice(-20) : []
       });
     }
   } catch (error) {
@@ -226,7 +230,8 @@ async function loadRoomsFromSupabase() {
       pages,
       activePageId: row.active_page_id || pages[0].id,
       users: new Map(),
-      ownerId: ""
+      ownerId: "",
+      deletedPages: []
     });
   }
 }
@@ -614,6 +619,7 @@ function handleMessage(socket, raw) {
   if (message.type === "cursor") handleCursor(socket, room, message);
   if (message.type === "add-page") handleAddPage(socket, room, message);
   if (message.type === "delete-page") handleDeletePage(socket, room, message);
+  if (message.type === "restore-page") handleRestorePage(socket, room);
   if (message.type === "rename-page") handleRenamePage(socket, room, message);
   if (message.type === "switch-page") handleSwitchPage(socket, room, message);
   if (message.type === "heartbeat") socket.send(JSON.stringify({ type: "heartbeat" }));
@@ -798,6 +804,7 @@ function handleDeletePage(socket, room, message) {
   if (pageIndex === -1) return;
 
   const [deletedPage] = room.pages.splice(pageIndex, 1);
+  room.deletedPages = [...(room.deletedPages || []), { id: deletedPage.id, title: deletedPage.title, text: deletedPage.text, version: deletedPage.version }].slice(-20);
   const fallbackPage = room.pages[Math.min(pageIndex, room.pages.length - 1)];
   if (room.activePageId === deletedPage.id) {
     room.activePageId = fallbackPage.id;
@@ -811,15 +818,53 @@ function handleDeletePage(socket, room, message) {
   }
 
   scheduleSave();
-  broadcast(room, { type: "page-deleted", pageId: deletedPage.id, activePageId: fallbackPage.id });
+  broadcast(room, {
+    type: "page-deleted",
+    pageId: deletedPage.id,
+    activePageId: fallbackPage.id,
+    deletedPageCount: room.deletedPages.length
+  });
+}
+
+function handleRestorePage(socket, room) {
+  if (room.ownerId !== socket.id) {
+    socket.send(JSON.stringify({ type: "action-error", action: "restore-page", reason: "owner-only" }));
+    return;
+  }
+  const deletedPage = room.deletedPages?.pop();
+  if (!deletedPage) {
+    socket.send(JSON.stringify({ type: "action-error", action: "restore-page", reason: "nothing-to-restore" }));
+    return;
+  }
+
+  const page = {
+    id: randomUUID(),
+    title: normalizePageTitle(deletedPage.title, "Restored page"),
+    text: String(deletedPage.text || "").slice(0, maxPageChars),
+    version: Number(deletedPage.version) || 0,
+    history: []
+  };
+  room.pages.push(page);
+  room.activePageId = page.id;
+  scheduleSave();
+  broadcast(room, {
+    type: "page-restored",
+    page: { id: page.id, title: page.title, text: page.text, version: page.version },
+    deletedPageCount: room.deletedPages.length
+  });
 }
 
 function handleRenamePage(socket, room, message) {
   const page = room.pages.find((item) => item.id === message.pageId);
   if (!page) return;
-  page.title = String(message.title || page.title).trim().slice(0, 40) || page.title;
+  page.title = normalizePageTitle(message.title, page.title);
   scheduleSave();
   broadcast(room, { type: "page-renamed", pageId: page.id, title: page.title });
+}
+
+function normalizePageTitle(title, fallback) {
+  const normalized = String(title || "").trim().slice(0, 40);
+  return normalized || fallback || "Untitled";
 }
 
 function handleSwitchPage(socket, room, message) {
