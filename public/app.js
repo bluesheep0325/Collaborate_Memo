@@ -14,6 +14,10 @@ const editTitleButton = document.querySelector("#editTitleButton");
 const statusText = document.querySelector("#statusText");
 const userList = document.querySelector("#userList");
 const shareButton = document.querySelector("#shareButton");
+const movePageUpButton = document.querySelector("#movePageUpButton");
+const movePageDownButton = document.querySelector("#movePageDownButton");
+const duplicatePageButton = document.querySelector("#duplicatePageButton");
+const previewButton = document.querySelector("#previewButton");
 const restorePageButton = document.querySelector("#restorePageButton");
 const importButton = document.querySelector("#importButton");
 const exportButton = document.querySelector("#exportButton");
@@ -22,6 +26,8 @@ const saveButton = document.querySelector("#saveButton");
 const leaveButton = document.querySelector("#leaveButton");
 const importFileInput = document.querySelector("#importFileInput");
 const memoInput = document.querySelector("#memoInput");
+const editorFrame = document.querySelector(".editor-frame");
+const previewPane = document.querySelector("#previewPane");
 const cursorLayer = document.querySelector("#cursorLayer");
 const sessionKey = "collaborate-memo-session";
 
@@ -36,6 +42,7 @@ const state = {
   users: new Map(),
   deletedPageCount: 0,
   searchQuery: "",
+  previewMode: false,
   lastValue: "",
   titleTimer: null,
   titleBeforeEdit: "",
@@ -115,6 +122,25 @@ restorePageButton.addEventListener("click", () => {
   send({ type: "restore-page" });
 });
 
+movePageUpButton.addEventListener("click", () => {
+  moveCurrentPage("up");
+});
+
+movePageDownButton.addEventListener("click", () => {
+  moveCurrentPage("down");
+});
+
+duplicatePageButton.addEventListener("click", () => {
+  const page = currentPage();
+  if (!page || !canEdit()) return;
+  send({ type: "duplicate-page", pageId: page.id });
+});
+
+previewButton.addEventListener("click", () => {
+  state.previewMode = !state.previewMode;
+  renderPreview();
+});
+
 exportButton.addEventListener("click", exportAllPages);
 
 importButton.addEventListener("click", () => {
@@ -176,6 +202,7 @@ memoInput.addEventListener("input", (event) => {
   const nextValue = memoInput.value;
   if (state.composing || event.isComposing) {
     page.text = nextValue;
+    renderPreview();
     return;
   }
 
@@ -195,6 +222,7 @@ memoInput.addEventListener("input", (event) => {
 
   page.text = nextValue;
   state.lastValue = nextValue;
+  renderPreview();
   page.version += 1;
   state.localSequence += 1;
   rememberPendingOp(page.id, state.localSequence, op);
@@ -236,6 +264,7 @@ memoInput.addEventListener("compositionend", () => {
 
   page.text = nextValue;
   state.lastValue = nextValue;
+  renderPreview();
   page.version += 1;
   state.localSequence += 1;
   rememberPendingOp(page.id, state.localSequence, op);
@@ -345,6 +374,7 @@ function handleMessage(message) {
     memoView.classList.add("hidden");
     const errorLabels = {
       "invalid-password": "合言葉が違います。",
+      "invalid-room-id": "ルームIDに使える文字は、文字・数字・_・- のみです。",
       "room-full": "このルームは満員です。",
       "server-full": "作成できるルーム数の上限に達しています。",
       "rate-limited": "入室試行が多すぎます。少し待ってください。"
@@ -422,6 +452,15 @@ function handleMessage(message) {
     }
   }
 
+  if (message.type === "pages-reordered") {
+    const pagesById = new Map(state.pages.map((page) => [page.id, page]));
+    state.pages = message.pageIds.map((pageId) => pagesById.get(pageId)).filter(Boolean);
+    state.activePageId = state.pages.some((page) => page.id === state.activePageId)
+      ? state.activePageId
+      : message.activePageId || state.pages[0]?.id || "";
+    renderPages();
+  }
+
   if (message.type === "page-restored") {
     state.pages.push(message.page);
     state.deletedPageCount = Number(message.deletedPageCount) || 0;
@@ -463,6 +502,7 @@ function receivePageOp(message) {
     memoInput.value = page.text;
     state.lastValue = page.text;
     memoInput.setSelectionRange(selectionStart, selectionEnd);
+    renderPreview();
     renderCursors();
   }
 }
@@ -489,6 +529,7 @@ function receivePageReplace(message) {
     memoInput.value = page.text;
     state.lastValue = page.text;
     memoInput.setSelectionRange(cursorPosition, cursorPosition);
+    renderPreview();
     renderCursors();
   }
 }
@@ -512,6 +553,7 @@ function receivePageRejected(message) {
     const cursorPosition = Math.min(memoInput.selectionStart, page.text.length);
     memoInput.value = page.text;
     memoInput.setSelectionRange(cursorPosition, cursorPosition);
+    renderPreview();
     renderCursors();
   }
 
@@ -667,6 +709,7 @@ function switchPage(pageId, notify) {
   endTitleEditMode();
   memoInput.value = page.text;
   state.lastValue = page.text;
+  renderPreview();
   renderAll();
   memoInput.focus();
 
@@ -751,6 +794,9 @@ function setEditingEnabled(enabled) {
   addPageButton.disabled = !enabled;
   editTitleButton.disabled = !enabled;
   importButton.disabled = !enabled;
+  duplicatePageButton.disabled = !enabled;
+  movePageUpButton.disabled = !enabled;
+  movePageDownButton.disabled = !enabled;
   if (!enabled) {
     endTitleEditMode();
   }
@@ -776,6 +822,12 @@ function updateActionButtons() {
   restorePageButton.disabled = !canEdit() || !isOwner() || state.deletedPageCount <= 0;
   restorePageButton.title =
     state.deletedPageCount > 0 ? `${state.deletedPageCount}件の削除済みページを復元できます` : "復元できるページはありません";
+  duplicatePageButton.disabled = !canEdit() || !currentPage();
+  const pageIndex = state.pages.findIndex((page) => page.id === state.activePageId);
+  movePageUpButton.disabled = !canEdit() || pageIndex <= 0;
+  movePageDownButton.disabled = !canEdit() || pageIndex === -1 || pageIndex >= state.pages.length - 1;
+  previewButton.disabled = !state.joined;
+  previewButton.textContent = state.previewMode ? "Edit" : "Preview";
 }
 
 function scheduleReconnect() {
@@ -820,6 +872,7 @@ function replacePageText(page, text) {
 
   page.text = nextText;
   state.lastValue = nextText;
+  renderPreview();
   page.version += 1;
   state.localSequence += 1;
   clearPendingOps(page.id);
@@ -881,6 +934,91 @@ function finishPendingRecovery(message) {
 
 function recoveryTitle(title) {
   return normalizeTitle(`${title || "Untitled"} recovery`, "Recovered memo");
+}
+
+function moveCurrentPage(direction) {
+  const page = currentPage();
+  if (!page || !canEdit()) return;
+  send({ type: "move-page", pageId: page.id, direction });
+}
+
+function renderPreview() {
+  editorFrame.classList.toggle("is-preview", state.previewMode);
+  previewPane.classList.toggle("hidden", !state.previewMode);
+  previewButton.textContent = state.previewMode ? "Edit" : "Preview";
+  if (!state.previewMode) return;
+
+  const page = currentPage();
+  previewPane.replaceChildren(...markdownNodes(page?.text || ""));
+}
+
+function markdownNodes(text) {
+  const nodes = [];
+  let list = null;
+  let codeBlock = null;
+
+  function finishList() {
+    if (list) {
+      nodes.push(list);
+      list = null;
+    }
+  }
+
+  function finishCode() {
+    if (codeBlock) {
+      nodes.push(codeBlock);
+      codeBlock = null;
+    }
+  }
+
+  for (const line of text.split("\n")) {
+    if (line.startsWith("```")) {
+      if (codeBlock) {
+        finishCode();
+      } else {
+        finishList();
+        codeBlock = document.createElement("pre");
+      }
+      continue;
+    }
+
+    if (codeBlock) {
+      codeBlock.textContent += `${line}\n`;
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      finishList();
+      const element = document.createElement(`h${heading[1].length}`);
+      element.textContent = heading[2];
+      nodes.push(element);
+      continue;
+    }
+
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      if (!list) list = document.createElement("ul");
+      const item = document.createElement("li");
+      item.textContent = bullet[1];
+      list.append(item);
+      continue;
+    }
+
+    if (!line.trim()) {
+      finishList();
+      continue;
+    }
+
+    finishList();
+    const paragraph = document.createElement("p");
+    paragraph.textContent = line;
+    nodes.push(paragraph);
+  }
+
+  finishList();
+  finishCode();
+  return nodes.length ? nodes : [document.createElement("p")];
 }
 
 function exportAllPages() {
@@ -987,6 +1125,7 @@ function leaveRoom() {
   state.users = new Map();
   state.deletedPageCount = 0;
   state.searchQuery = "";
+  state.previewMode = false;
   pageSearchInput.value = "";
   state.lastValue = "";
   state.composing = false;
@@ -994,6 +1133,7 @@ function leaveRoom() {
   entryError.textContent = "";
   memoView.classList.add("hidden");
   entryView.classList.remove("hidden");
+  renderPreview();
   setStatus("offline");
 }
 

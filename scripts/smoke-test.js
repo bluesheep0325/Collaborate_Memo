@@ -43,6 +43,10 @@ try {
   assert(rejected.error.reason === "invalid-password", "wrong password should be rejected");
   rejected.socket.close();
 
+  const invalidRoom = await connectClient("smoke room", "Mallory", password);
+  assert(invalidRoom.error.reason === "invalid-room-id", "invalid room IDs should be rejected");
+  invalidRoom.socket.close();
+
   const alice = await connectClient("smoke-room", "Alice", password);
   const bob = await connectClient("smoke-room", "Bob", password);
   const pageId = alice.joined.room.pages[0].id;
@@ -91,6 +95,16 @@ try {
   assert(cursorMessage.cursor.index === 5, "cursor position should reach the other user");
   assert(cursorMessage.cursor.start === 1, "selection start should reach the other user");
   assert(cursorMessage.cursor.end === 5, "selection end should reach the other user");
+
+  const bobDuplicate = waitForMessage(bob.socket, (message) => message.type === "page-added", "bob duplicated page");
+  alice.socket.send(JSON.stringify({ type: "duplicate-page", pageId }));
+  const duplicateMessage = await bobDuplicate;
+  assert(duplicateMessage.page.text.length === largePaste.length, "duplicated page should keep text");
+
+  const bobReorder = waitForMessage(bob.socket, (message) => message.type === "pages-reordered", "bob pages reordered");
+  alice.socket.send(JSON.stringify({ type: "move-page", pageId: duplicateMessage.page.id, direction: "up" }));
+  const reorderMessage = await bobReorder;
+  assert(reorderMessage.pageIds[0] === duplicateMessage.page.id, "moved page should be reordered");
 
   const bobPage = waitForMessage(bob.socket, (message) => message.type === "page-added", "bob page-added");
   alice.socket.send(JSON.stringify({ type: "add-page", title: "Second page" }));

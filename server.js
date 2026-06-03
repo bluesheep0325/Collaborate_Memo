@@ -65,6 +65,7 @@ function createPage(title = "Page 1") {
 
 function getRoom(roomId) {
   if (!rooms.has(roomId)) {
+    pruneBlankEmptyRooms();
     if (rooms.size >= maxRooms) return null;
     const firstPage = createPage("Page 1");
     rooms.set(roomId, {
@@ -78,6 +79,17 @@ function getRoom(roomId) {
     scheduleSave();
   }
   return rooms.get(roomId);
+}
+
+function pruneBlankEmptyRooms() {
+  for (const [roomId, room] of rooms) {
+    const isBlank =
+      room.users.size === 0 &&
+      room.pages.length === 1 &&
+      room.pages[0].text.length === 0 &&
+      (room.deletedPages?.length || 0) === 0;
+    if (isBlank) rooms.delete(roomId);
+  }
 }
 
 function safeRoomId(value) {
@@ -618,6 +630,8 @@ function handleMessage(socket, raw) {
   if (message.type === "page-replace") handlePageReplace(socket, room, message);
   if (message.type === "cursor") handleCursor(socket, room, message);
   if (message.type === "add-page") handleAddPage(socket, room, message);
+  if (message.type === "duplicate-page") handleDuplicatePage(socket, room, message);
+  if (message.type === "move-page") handleMovePage(socket, room, message);
   if (message.type === "delete-page") handleDeletePage(socket, room, message);
   if (message.type === "restore-page") handleRestorePage(socket, room);
   if (message.type === "rename-page") handleRenamePage(socket, room, message);
@@ -638,7 +652,13 @@ function joinRoom(socket, message) {
     return;
   }
 
-  const roomId = safeRoomId(message.roomId) || "default";
+  const rawRoomId = String(message.roomId || "").trim() || "default";
+  const roomId = safeRoomId(rawRoomId);
+  if (!roomId || roomId !== rawRoomId) {
+    socket.send(JSON.stringify({ type: "join-error", reason: "invalid-room-id" }));
+    setTimeout(() => socket.end(), 50);
+    return;
+  }
   const room = getRoom(roomId);
   if (!room) {
     socket.send(JSON.stringify({ type: "join-error", reason: "server-full" }));
@@ -654,11 +674,11 @@ function joinRoom(socket, message) {
   if (!room.ownerId || room.users.size === 0) {
     room.ownerId = socket.id;
   }
-  const colorIndex = room.users.size % colorPalette.length;
+  const colorIndex = room.users.size;
   const user = {
     id: socket.id,
     name: String(message.userName || "Guest").trim().slice(0, 24) || "Guest",
-    color: colorPalette[colorIndex],
+    color: colorForIndex(colorIndex),
     role: socket.id === room.ownerId ? "owner" : "editor",
     cursor: { pageId: room.activePageId, index: 0, start: 0, end: 0 },
     activePageId: room.activePageId
@@ -790,6 +810,46 @@ function handleAddPage(socket, room, message) {
   });
 }
 
+function handleDuplicatePage(socket, room, message) {
+  if (room.pages.length >= maxPagesPerRoom) {
+    socket.send(JSON.stringify({ type: "action-error", action: "duplicate-page", reason: "page-limit" }));
+    return;
+  }
+  const source = room.pages.find((item) => item.id === message.pageId);
+  if (!source) return;
+
+  const page = createPage(normalizePageTitle(`${source.title} copy`, "Copied page"));
+  page.text = source.text;
+  page.version = source.version;
+  const sourceIndex = room.pages.findIndex((item) => item.id === source.id);
+  room.pages.splice(sourceIndex + 1, 0, page);
+  room.activePageId = page.id;
+  scheduleSave();
+  broadcast(room, {
+    type: "page-added",
+    page: { id: page.id, title: page.title, text: page.text, version: page.version },
+    userId: socket.id
+  });
+}
+
+function handleMovePage(socket, room, message) {
+  const pageIndex = room.pages.findIndex((item) => item.id === message.pageId);
+  if (pageIndex === -1) return;
+  const direction = message.direction === "up" ? -1 : message.direction === "down" ? 1 : 0;
+  if (!direction) return;
+  const nextIndex = pageIndex + direction;
+  if (nextIndex < 0 || nextIndex >= room.pages.length) return;
+
+  const [page] = room.pages.splice(pageIndex, 1);
+  room.pages.splice(nextIndex, 0, page);
+  scheduleSave();
+  broadcast(room, {
+    type: "pages-reordered",
+    pageIds: room.pages.map((item) => item.id),
+    activePageId: room.activePageId
+  });
+}
+
 function handleDeletePage(socket, room, message) {
   if (room.ownerId !== socket.id) {
     socket.send(JSON.stringify({ type: "action-error", action: "delete-page", reason: "owner-only" }));
@@ -865,6 +925,12 @@ function handleRenamePage(socket, room, message) {
 function normalizePageTitle(title, fallback) {
   const normalized = String(title || "").trim().slice(0, 40);
   return normalized || fallback || "Untitled";
+}
+
+function colorForIndex(index) {
+  if (index < colorPalette.length) return colorPalette[index];
+  const hue = Math.round((index * 137.508) % 360);
+  return `hsl(${hue} 72% 42%)`;
 }
 
 function handleSwitchPage(socket, room, message) {
