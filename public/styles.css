@@ -307,6 +307,31 @@ textarea:focus {
   gap: 6px;
 }
 
+.page-drag-handle {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  cursor: grab;
+  font-size: 0.78rem;
+  font-weight: 800;
+  touch-action: none;
+}
+
+.page-drag-handle:hover:not(:disabled) {
+  border-color: #9ccbd6;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.page-drag-handle:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .page-item {
   display: flex;
   flex: 1 1 auto;
@@ -318,7 +343,6 @@ textarea:focus {
   border-radius: 6px;
   background: transparent;
   color: var(--text);
-  cursor: grab;
   text-align: left;
 }
 
@@ -334,7 +358,7 @@ textarea:focus {
   font-weight: 800;
 }
 
-.page-row:active {
+.page-drag-handle:active {
   cursor: grabbing;
 }
 
@@ -476,6 +500,39 @@ textarea:focus {
   justify-content: flex-end;
   gap: 10px;
   min-width: 0;
+}
+
+.compact-tool {
+  min-width: 58px;
+}
+
+.format-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.format-control input[type="color"] {
+  width: 34px;
+  height: 30px;
+  padding: 2px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.format-control select {
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 #previewButton {

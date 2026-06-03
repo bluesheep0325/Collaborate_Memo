@@ -8,7 +8,8 @@ Reloading the page rejoins the current room in the same browser tab. Use `退出
 
 - Realtime multi-user memo editing with remote cursors and selections.
 - Multiple pages per room, page search, title editing, duplication, drag-and-drop reordering, deletion, and restore.
-- Markdown preview for the current page.
+- Markdown preview plus selected-text bold, color, and size markup.
+- Reloading the tab returns to the last page edited in that tab.
 - Deleted page restore for recent accidental deletes.
 - Current-page TXT export plus all-page JSON export/import.
 - Share-link copy with the current room ID.

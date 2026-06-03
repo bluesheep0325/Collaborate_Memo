@@ -12,6 +12,9 @@ const pageSearchInput = document.querySelector("#pageSearchInput");
 const pageTitleInput = document.querySelector("#pageTitleInput");
 const statusText = document.querySelector("#statusText");
 const userList = document.querySelector("#userList");
+const boldButton = document.querySelector("#boldButton");
+const textColorInput = document.querySelector("#textColorInput");
+const textSizeSelect = document.querySelector("#textSizeSelect");
 const shareButton = document.querySelector("#shareButton");
 const duplicatePageButton = document.querySelector("#duplicatePageButton");
 const previewButton = document.querySelector("#previewButton");
@@ -41,7 +44,9 @@ const state = {
   searchQuery: "",
   previewMode: false,
   draggingPageId: "",
+  dropTargetPageId: "",
   editingPageId: "",
+  lastEditedPageId: "",
   lastValue: "",
   titleTimer: null,
   titleBeforeEdit: "",
@@ -95,19 +100,6 @@ pageSearchInput.addEventListener("input", () => {
   renderPages();
 });
 
-pageList.addEventListener("dragover", (event) => {
-  if (!state.draggingPageId) return;
-  event.preventDefault();
-  event.dataTransfer.dropEffect = "move";
-});
-
-pageList.addEventListener("drop", (event) => {
-  const dropItem = event.target instanceof Element ? event.target.closest(".page-row") : null;
-  if (!state.draggingPageId || dropItem) return;
-  event.preventDefault();
-  send({ type: "move-page", pageId: state.draggingPageId, beforePageId: "" });
-});
-
 shareButton.addEventListener("click", async () => {
   if (!state.roomId) return;
   const url = new URL(location.href);
@@ -136,6 +128,20 @@ previewButton.addEventListener("click", () => {
   renderPreview();
 });
 
+boldButton.addEventListener("click", () => {
+  formatSelection("**", "**", "太字");
+});
+
+textColorInput.addEventListener("change", () => {
+  formatSelection(`[color=${textColorInput.value}]`, "[/color]", "色付きテキスト");
+});
+
+textSizeSelect.addEventListener("change", () => {
+  if (!textSizeSelect.value) return;
+  formatSelection(`[size=${textSizeSelect.value}]`, "[/size]", "サイズ変更テキスト");
+  textSizeSelect.value = "";
+});
+
 exportButton.addEventListener("click", exportAllPages);
 
 importButton.addEventListener("click", () => {
@@ -157,6 +163,7 @@ memoInput.addEventListener("input", (event) => {
   const nextValue = memoInput.value;
   if (state.composing || event.isComposing) {
     page.text = nextValue;
+    markPageEdited(page.id);
     renderPreview();
     return;
   }
@@ -177,6 +184,7 @@ memoInput.addEventListener("input", (event) => {
 
   page.text = nextValue;
   state.lastValue = nextValue;
+  markPageEdited(page.id);
   renderPreview();
   page.version += 1;
   state.localSequence += 1;
@@ -219,6 +227,7 @@ memoInput.addEventListener("compositionend", () => {
 
   page.text = nextValue;
   state.lastValue = nextValue;
+  markPageEdited(page.id);
   renderPreview();
   page.version += 1;
   state.localSequence += 1;
@@ -303,6 +312,11 @@ function handleMessage(message) {
     state.selfId = message.selfId;
     state.activePageId = message.room.activePageId;
     state.pages = message.room.pages;
+    const saved = loadSession();
+    if (saved?.pageId && state.pages.some((page) => page.id === saved.pageId)) {
+      state.activePageId = saved.pageId;
+      state.lastEditedPageId = saved.pageId;
+    }
     state.users = new Map(message.room.users.map((user) => [user.id, user]));
     state.deletedPageCount = Number(message.room.deletedPageCount) || 0;
     state.pendingOps = new Map();
@@ -531,8 +545,18 @@ function renderPages() {
       const isEditing = state.editingPageId === page.id;
       const row = document.createElement("div");
       row.className = `page-row${page.id === state.activePageId ? " active" : ""}`;
-      row.draggable = canEdit() && !isEditing;
       row.dataset.pageId = page.id;
+
+      const dragHandle = document.createElement("button");
+      dragHandle.className = "page-drag-handle";
+      dragHandle.type = "button";
+      dragHandle.textContent = "移動";
+      dragHandle.title = "ドラッグして並べ替え";
+      dragHandle.disabled = !canEdit() || isEditing || visiblePages.length <= 1;
+      dragHandle.addEventListener("pointerdown", (event) => {
+        if (dragHandle.disabled) return;
+        beginPageDrag(page.id, row, event);
+      });
 
       let titleControl;
       if (isEditing) {
@@ -557,7 +581,6 @@ function renderPages() {
         titleControl = document.createElement("button");
         titleControl.className = `page-item${page.id === state.activePageId ? " active" : ""}`;
         titleControl.type = "button";
-        titleControl.draggable = canEdit();
         titleControl.dataset.pageId = page.id;
         titleControl.textContent = page.title || "Untitled";
         titleControl.addEventListener("click", () => switchPage(page.id, true));
@@ -580,34 +603,7 @@ function renderPages() {
       });
       editButton.addEventListener("mousedown", (event) => event.preventDefault());
 
-      row.addEventListener("dragstart", (event) => {
-        if (!canEdit() || state.editingPageId) return;
-        state.draggingPageId = page.id;
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", page.id);
-        row.classList.add("dragging");
-      });
-      row.addEventListener("dragend", () => {
-        state.draggingPageId = "";
-        pageList.querySelectorAll(".page-row").forEach((item) => item.classList.remove("dragging", "drop-target"));
-      });
-      row.addEventListener("dragover", (event) => {
-        if (!state.draggingPageId || state.draggingPageId === page.id) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-        row.classList.add("drop-target");
-      });
-      row.addEventListener("dragleave", () => {
-        row.classList.remove("drop-target");
-      });
-      row.addEventListener("drop", (event) => {
-        event.preventDefault();
-        const pageId = event.dataTransfer.getData("text/plain") || state.draggingPageId;
-        row.classList.remove("drop-target");
-        if (!pageId || pageId === page.id) return;
-        send({ type: "move-page", pageId, beforePageId: page.id });
-      });
-      row.append(titleControl, editButton);
+      row.append(dragHandle, titleControl, editButton);
       return row;
     })
   );
@@ -623,6 +619,77 @@ function renderPages() {
     editingInput?.select();
   }
   updateActionButtons();
+}
+
+function beginPageDrag(pageId, row, event) {
+  event.preventDefault();
+  state.draggingPageId = pageId;
+  state.dropTargetPageId = "";
+  row.classList.add("dragging");
+  row.setPointerCapture?.(event.pointerId);
+  updatePageDragTarget(event.clientX, event.clientY);
+
+  function onPointerMove(moveEvent) {
+    updatePageDragTarget(moveEvent.clientX, moveEvent.clientY);
+  }
+
+  function onPointerUp(upEvent) {
+    document.removeEventListener("pointermove", onPointerMove);
+    document.removeEventListener("pointerup", onPointerUp);
+    finishPageDrag(upEvent.clientX, upEvent.clientY);
+  }
+
+  document.addEventListener("pointermove", onPointerMove);
+  document.addEventListener("pointerup", onPointerUp, { once: true });
+}
+
+function updatePageDragTarget(clientX, clientY) {
+  pageList.querySelectorAll(".page-row").forEach((item) => item.classList.remove("drop-target"));
+  if (!state.draggingPageId) return;
+
+  const target = pageRowFromPoint(clientX, clientY);
+  state.dropTargetPageId = target?.dataset.pageId || "";
+  if (target && state.dropTargetPageId !== state.draggingPageId) {
+    target.classList.add("drop-target");
+  }
+}
+
+function finishPageDrag(clientX, clientY) {
+  const pageId = state.draggingPageId;
+  const target = pageRowFromPoint(clientX, clientY);
+  const beforePageId = target ? beforePageIdForDrop(target, clientY, pageId) : "";
+  const droppedInList = pointInElement(pageList, clientX, clientY);
+  pageList.querySelectorAll(".page-row").forEach((item) => item.classList.remove("dragging", "drop-target"));
+  state.draggingPageId = "";
+  state.dropTargetPageId = "";
+
+  if (!droppedInList) return;
+  if (!pageId || beforePageId === pageId) return;
+  send({ type: "move-page", pageId, beforePageId });
+}
+
+function beforePageIdForDrop(target, clientY, draggedPageId) {
+  const targetPageId = target.dataset.pageId || "";
+  if (!targetPageId) return "";
+
+  const rect = target.getBoundingClientRect();
+  if (clientY <= rect.top + rect.height / 2) return targetPageId;
+
+  const orderedPageIds = state.pages.map((page) => page.id).filter((pageId) => pageId !== draggedPageId);
+  const targetIndex = orderedPageIds.indexOf(targetPageId);
+  return targetIndex === -1 ? "" : orderedPageIds[targetIndex + 1] || "";
+}
+
+function pageRowFromPoint(clientX, clientY) {
+  const element = document.elementFromPoint(clientX, clientY);
+  if (!(element instanceof Element)) return null;
+  const row = element.closest(".page-row");
+  return row && pageList.contains(row) ? row : null;
+}
+
+function pointInElement(element, clientX, clientY) {
+  const rect = element.getBoundingClientRect();
+  return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
 }
 
 function renderUsers() {
@@ -771,6 +838,7 @@ function commitTitleEdit(pageId = state.editingPageId, title = "") {
   clearTimeout(state.titleTimer);
   page.title = normalizeTitle(title, state.titleBeforeEdit || page.title);
   pageTitleInput.value = page.title;
+  markPageEdited(page.id);
   send({ type: "rename-page", pageId: page.id, title: page.title });
   endTitleEditMode();
   renderPages();
@@ -894,6 +962,7 @@ function replacePageText(page, text) {
 
   page.text = nextText;
   state.lastValue = nextText;
+  markPageEdited(page.id);
   renderPreview();
   page.version += 1;
   state.localSequence += 1;
@@ -958,6 +1027,22 @@ function recoveryTitle(title) {
   return normalizeTitle(`${title || "Untitled"} recovery`, "Recovered memo");
 }
 
+function formatSelection(prefix, suffix, placeholder) {
+  const page = currentPage();
+  if (!page || !canEdit()) return;
+
+  const start = memoInput.selectionStart;
+  const end = memoInput.selectionEnd;
+  const selectedText = memoInput.value.slice(start, end) || placeholder;
+  const nextText = `${memoInput.value.slice(0, start)}${prefix}${selectedText}${suffix}${memoInput.value.slice(end)}`;
+  replacePageText(page, nextText);
+
+  const selectionStart = start + prefix.length;
+  const selectionEnd = selectionStart + selectedText.length;
+  memoInput.focus();
+  memoInput.setSelectionRange(selectionStart, selectionEnd);
+}
+
 function renderPreview() {
   editorFrame.classList.toggle("is-preview", state.previewMode);
   previewPane.classList.toggle("hidden", !state.previewMode);
@@ -1009,7 +1094,7 @@ function markdownNodes(text) {
     if (heading) {
       finishList();
       const element = document.createElement(`h${heading[1].length}`);
-      element.textContent = heading[2];
+      appendInlineNodes(element, heading[2]);
       nodes.push(element);
       continue;
     }
@@ -1018,7 +1103,7 @@ function markdownNodes(text) {
     if (bullet) {
       if (!list) list = document.createElement("ul");
       const item = document.createElement("li");
-      item.textContent = bullet[1];
+      appendInlineNodes(item, bullet[1]);
       list.append(item);
       continue;
     }
@@ -1030,13 +1115,67 @@ function markdownNodes(text) {
 
     finishList();
     const paragraph = document.createElement("p");
-    paragraph.textContent = line;
+    appendInlineNodes(paragraph, line);
     nodes.push(paragraph);
   }
 
   finishList();
   finishCode();
   return nodes.length ? nodes : [document.createElement("p")];
+}
+
+function appendInlineNodes(parent, text) {
+  for (const node of inlineNodes(text)) {
+    parent.append(node);
+  }
+}
+
+function inlineNodes(text) {
+  const boldStart = text.indexOf("**");
+  const colorMatch = text.match(/\[color=(#[0-9a-fA-F]{6})\]/);
+  const sizeMatch = text.match(/\[size=(\d{1,2})\]/);
+  const candidates = [
+    boldStart === -1 ? null : { index: boldStart, type: "bold" },
+    colorMatch ? { index: colorMatch.index, type: "color", match: colorMatch } : null,
+    sizeMatch ? { index: sizeMatch.index, type: "size", match: sizeMatch } : null
+  ]
+    .filter(Boolean)
+    .sort((a, b) => a.index - b.index);
+
+  if (candidates.length === 0) return [document.createTextNode(text)];
+
+  const first = candidates[0];
+  const nodes = [];
+  if (first.index > 0) nodes.push(document.createTextNode(text.slice(0, first.index)));
+
+  if (first.type === "bold") {
+    const end = text.indexOf("**", first.index + 2);
+    if (end === -1) return [document.createTextNode(text)];
+    const strong = document.createElement("strong");
+    appendInlineNodes(strong, text.slice(first.index + 2, end));
+    nodes.push(strong, ...inlineNodes(text.slice(end + 2)));
+    return nodes;
+  }
+
+  if (first.type === "color") {
+    const open = first.match[0];
+    const end = text.indexOf("[/color]", first.index + open.length);
+    if (end === -1) return [document.createTextNode(text)];
+    const span = document.createElement("span");
+    span.style.color = first.match[1];
+    appendInlineNodes(span, text.slice(first.index + open.length, end));
+    nodes.push(span, ...inlineNodes(text.slice(end + 8)));
+    return nodes;
+  }
+
+  const open = first.match[0];
+  const end = text.indexOf("[/size]", first.index + open.length);
+  if (end === -1) return [document.createTextNode(text)];
+  const span = document.createElement("span");
+  span.style.fontSize = `${Math.min(48, Math.max(10, Number(first.match[1])))}px`;
+  appendInlineNodes(span, text.slice(first.index + open.length, end));
+  nodes.push(span, ...inlineNodes(text.slice(end + 7)));
+  return nodes;
 }
 
 function exportAllPages() {
@@ -1112,9 +1251,16 @@ function saveSession() {
     JSON.stringify({
       roomId: state.roomId,
       userName: state.userName,
-      password: state.password
+      password: state.password,
+      pageId: state.lastEditedPageId || state.activePageId
     })
   );
+}
+
+function markPageEdited(pageId) {
+  if (!pageId) return;
+  state.lastEditedPageId = pageId;
+  saveSession();
 }
 
 function loadSession() {
@@ -1144,7 +1290,11 @@ function leaveRoom() {
   state.deletedPageCount = 0;
   state.searchQuery = "";
   state.previewMode = false;
+  state.draggingPageId = "";
+  state.dropTargetPageId = "";
+  state.editingPageId = "";
   pageSearchInput.value = "";
+  state.lastEditedPageId = "";
   state.lastValue = "";
   state.composing = false;
   state.pendingOps = new Map();
@@ -1393,5 +1543,6 @@ if (savedSession?.roomId && savedSession?.userName) {
   roomInput.value = savedSession.roomId;
   nameInput.value = savedSession.userName;
   passwordInput.value = savedSession.password || "";
+  state.lastEditedPageId = savedSession.pageId || "";
   connect(savedSession.roomId, savedSession.userName, savedSession.password || "");
 }
