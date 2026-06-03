@@ -106,6 +106,11 @@ try {
   const reorderMessage = await bobReorder;
   assert(reorderMessage.pageIds[0] === duplicateMessage.page.id, "moved page should be reordered");
 
+  const bobReorderToEnd = waitForMessage(bob.socket, (message) => message.type === "pages-reordered", "bob pages reordered to end");
+  alice.socket.send(JSON.stringify({ type: "move-page", pageId: duplicateMessage.page.id, beforePageId: "" }));
+  const reorderToEndMessage = await bobReorderToEnd;
+  assert(reorderToEndMessage.pageIds.at(-1) === duplicateMessage.page.id, "moved page should support moving to the end");
+
   const bobPage = waitForMessage(bob.socket, (message) => message.type === "page-added", "bob page-added");
   alice.socket.send(JSON.stringify({ type: "add-page", title: "Second page" }));
   const pageMessage = await bobPage;
