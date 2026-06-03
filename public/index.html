@@ -34,12 +34,28 @@
       <section class="memo-view hidden" id="memoView" aria-label="メモ画面">
         <aside class="sidebar">
           <div class="room-block">
-            <span class="muted">Room</span>
-            <strong id="roomLabel"></strong>
+            <div>
+              <span class="muted">Room</span>
+              <strong id="roomLabel"></strong>
+            </div>
+            <div class="room-actions">
+              <button id="shareButton" class="icon-button" type="button" title="共有リンク" aria-label="共有リンク">L</button>
+              <button id="leaveButton" class="icon-button" type="button" title="退出" aria-label="退出">X</button>
+            </div>
           </div>
           <div class="side-head">
             <span>Pages</span>
             <button id="addPageButton" class="icon-button" title="ページを追加" aria-label="ページを追加">+</button>
+          </div>
+          <div class="page-tools" aria-label="ページ操作">
+            <button id="duplicatePageButton" class="icon-button" type="button" title="ページを複製" aria-label="ページを複製">D</button>
+            <button id="deletePageButton" class="icon-button danger-icon" type="button" title="ページを削除" aria-label="ページを削除">-</button>
+            <button id="restorePageButton" class="icon-button" type="button" title="削除ページを復元" aria-label="削除ページを復元">R</button>
+            <button id="previewButton" class="icon-button" type="button" title="Preview" aria-label="Preview">P</button>
+            <button id="importButton" class="icon-button" type="button" title="読み込み" aria-label="読み込み">I</button>
+            <button id="exportButton" class="icon-button" type="button" title="全ページ保存" aria-label="全ページ保存">A</button>
+            <button id="saveButton" class="icon-button" type="button" title="現在ページをTXT保存" aria-label="現在ページをTXT保存">T</button>
+            <input id="importFileInput" class="hidden" type="file" accept=".json,.txt,text/plain,application/json" />
           </div>
           <input id="pageSearchInput" class="page-search" type="search" autocomplete="off" placeholder="ページ検索" aria-label="ページ検索" />
           <nav id="pageList" class="page-list" aria-label="ページ一覧"></nav>
@@ -56,18 +72,6 @@
             </div>
             <div class="toolbar-actions">
               <div id="userList" class="user-list" aria-label="参加ユーザー"></div>
-              <button id="shareButton" class="ghost-button" type="button">リンク</button>
-              <button id="movePageUpButton" class="ghost-button" type="button">↑</button>
-              <button id="movePageDownButton" class="ghost-button" type="button">↓</button>
-              <button id="duplicatePageButton" class="ghost-button" type="button">複製</button>
-              <button id="previewButton" class="ghost-button" type="button">Preview</button>
-              <button id="restorePageButton" class="ghost-button" type="button">復元</button>
-              <button id="importButton" class="ghost-button" type="button">読込</button>
-              <button id="exportButton" class="secondary-button" type="button">全保存</button>
-              <button id="deletePageButton" class="danger-button" type="button">ページ削除</button>
-              <button id="saveButton" class="secondary-button">TXT保存</button>
-              <button id="leaveButton" class="ghost-button" type="button">退出</button>
-              <input id="importFileInput" class="hidden" type="file" accept=".json,.txt,text/plain,application/json" />
             </div>
           </header>
 

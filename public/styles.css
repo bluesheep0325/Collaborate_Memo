@@ -186,10 +186,35 @@ textarea:focus {
 }
 
 .room-block {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   padding: 0 4px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.room-block > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+#roomLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-actions,
+.page-tools {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.page-tools {
+  flex-wrap: wrap;
 }
 
 .muted,
@@ -223,6 +248,15 @@ textarea:focus {
   line-height: 1;
 }
 
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.danger-icon {
+  color: #b91c1c;
+}
+
 .page-list {
   display: grid;
   gap: 7px;
@@ -246,7 +280,12 @@ textarea:focus {
   border-radius: 6px;
   background: transparent;
   color: var(--text);
+  cursor: grab;
   text-align: left;
+}
+
+.page-item:active {
+  cursor: grabbing;
 }
 
 .page-item.active {
@@ -254,6 +293,15 @@ textarea:focus {
   background: var(--accent-soft);
   color: var(--accent-strong);
   font-weight: 800;
+}
+
+.page-item.dragging {
+  opacity: 0.55;
+}
+
+.page-item.drop-target {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .workspace {
@@ -356,6 +404,10 @@ textarea:focus {
   justify-content: flex-end;
   gap: 10px;
   min-width: 0;
+}
+
+#previewButton {
+  width: 32px;
 }
 
 .user-list {
@@ -553,7 +605,7 @@ textarea:focus {
   }
 
   .room-block {
-    display: none;
+    padding-bottom: 10px;
   }
 
   .page-list {

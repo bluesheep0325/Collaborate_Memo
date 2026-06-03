@@ -102,7 +102,7 @@ try {
   assert(duplicateMessage.page.text.length === largePaste.length, "duplicated page should keep text");
 
   const bobReorder = waitForMessage(bob.socket, (message) => message.type === "pages-reordered", "bob pages reordered");
-  alice.socket.send(JSON.stringify({ type: "move-page", pageId: duplicateMessage.page.id, direction: "up" }));
+  alice.socket.send(JSON.stringify({ type: "move-page", pageId: duplicateMessage.page.id, beforePageId: pageId }));
   const reorderMessage = await bobReorder;
   assert(reorderMessage.pageIds[0] === duplicateMessage.page.id, "moved page should be reordered");
 
@@ -116,21 +116,16 @@ try {
   const renameMessage = await aliceRename;
   assert(renameMessage.title === "Renamed page", "renamed page title should reach the other user");
 
-  const bobDenied = waitForMessage(bob.socket, (message) => message.type === "action-error", "bob delete denied");
-  bob.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
-  const deniedMessage = await bobDenied;
-  assert(deniedMessage.reason === "owner-only", "non-owner page delete should be denied");
-
   const aliceDelete = waitForMessage(alice.socket, (message) => message.type === "page-deleted", "alice page-deleted");
-  alice.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
+  bob.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
   const deleteMessage = await aliceDelete;
-  assert(deleteMessage.pageId === pageMessage.page.id, "deleted page should reach the other user");
+  assert(deleteMessage.pageId === pageMessage.page.id, "non-owner deleted page should reach the other user");
   assert(deleteMessage.deletedPageCount === 1, "deleted page count should be broadcast");
 
   const bobRestore = waitForMessage(bob.socket, (message) => message.type === "page-restored", "bob page-restored");
-  alice.socket.send(JSON.stringify({ type: "restore-page" }));
+  bob.socket.send(JSON.stringify({ type: "restore-page" }));
   const restoreMessage = await bobRestore;
-  assert(restoreMessage.page.title === "Second page", "restored page should keep its title");
+  assert(restoreMessage.page.title === "Second page", "non-owner restored page should keep its title");
   assert(restoreMessage.deletedPageCount === 0, "restored page should update deleted count");
 
   alice.socket.close();

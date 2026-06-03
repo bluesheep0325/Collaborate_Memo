@@ -14,8 +14,6 @@ const editTitleButton = document.querySelector("#editTitleButton");
 const statusText = document.querySelector("#statusText");
 const userList = document.querySelector("#userList");
 const shareButton = document.querySelector("#shareButton");
-const movePageUpButton = document.querySelector("#movePageUpButton");
-const movePageDownButton = document.querySelector("#movePageDownButton");
 const duplicatePageButton = document.querySelector("#duplicatePageButton");
 const previewButton = document.querySelector("#previewButton");
 const restorePageButton = document.querySelector("#restorePageButton");
@@ -43,6 +41,7 @@ const state = {
   deletedPageCount: 0,
   searchQuery: "",
   previewMode: false,
+  draggingPageId: "",
   lastValue: "",
   titleTimer: null,
   titleBeforeEdit: "",
@@ -86,10 +85,6 @@ deletePageButton.addEventListener("click", () => {
   if (!canEdit()) return;
   const page = currentPage();
   if (!page || state.pages.length <= 1) return;
-  if (!isOwner()) {
-    showNotice("ページ削除はルーム所有者のみ実行できます。", "error");
-    return;
-  }
   if (!confirm(`「${page.title}」を削除しますか？この操作は元に戻せません。`)) return;
   send({ type: "delete-page", pageId: page.id });
 });
@@ -99,6 +94,19 @@ leaveButton.addEventListener("click", leaveRoom);
 pageSearchInput.addEventListener("input", () => {
   state.searchQuery = pageSearchInput.value.trim().toLowerCase();
   renderPages();
+});
+
+pageList.addEventListener("dragover", (event) => {
+  if (!state.draggingPageId) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+});
+
+pageList.addEventListener("drop", (event) => {
+  const dropItem = event.target instanceof Element ? event.target.closest(".page-item") : null;
+  if (!state.draggingPageId || dropItem) return;
+  event.preventDefault();
+  send({ type: "move-page", pageId: state.draggingPageId, beforePageId: "" });
 });
 
 shareButton.addEventListener("click", async () => {
@@ -115,19 +123,7 @@ shareButton.addEventListener("click", async () => {
 
 restorePageButton.addEventListener("click", () => {
   if (!canEdit()) return;
-  if (!isOwner()) {
-    showNotice("ページ復元はルーム所有者のみ実行できます。", "error");
-    return;
-  }
   send({ type: "restore-page" });
-});
-
-movePageUpButton.addEventListener("click", () => {
-  moveCurrentPage("up");
-});
-
-movePageDownButton.addEventListener("click", () => {
-  moveCurrentPage("down");
 });
 
 duplicatePageButton.addEventListener("click", () => {
@@ -471,7 +467,6 @@ function handleMessage(message) {
   if (message.type === "action-error") {
     const labels = {
       "page-limit": "ページ数の上限に達しています。",
-      "owner-only": "この操作はルーム所有者のみ実行できます。",
       "last-page": "最後のページは削除できません。",
       "nothing-to-restore": "復元できるページがありません。"
     };
@@ -577,18 +572,45 @@ function renderPages() {
       const button = document.createElement("button");
       button.className = `page-item${page.id === state.activePageId ? " active" : ""}`;
       button.type = "button";
+      button.draggable = canEdit();
+      button.dataset.pageId = page.id;
       button.textContent = page.title || "Untitled";
       button.addEventListener("click", () => switchPage(page.id, true));
+      button.addEventListener("dragstart", (event) => {
+        if (!canEdit()) return;
+        state.draggingPageId = page.id;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", page.id);
+        button.classList.add("dragging");
+      });
+      button.addEventListener("dragend", () => {
+        state.draggingPageId = "";
+        pageList.querySelectorAll(".page-item").forEach((item) => item.classList.remove("dragging", "drop-target"));
+      });
+      button.addEventListener("dragover", (event) => {
+        if (!state.draggingPageId || state.draggingPageId === page.id) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        button.classList.add("drop-target");
+      });
+      button.addEventListener("dragleave", () => {
+        button.classList.remove("drop-target");
+      });
+      button.addEventListener("drop", (event) => {
+        event.preventDefault();
+        const pageId = event.dataTransfer.getData("text/plain") || state.draggingPageId;
+        button.classList.remove("drop-target");
+        if (!pageId || pageId === page.id) return;
+        send({ type: "move-page", pageId, beforePageId: page.id });
+      });
       return button;
     })
   );
-  deletePageButton.disabled = !canEdit() || !isOwner() || state.pages.length <= 1;
+  deletePageButton.disabled = !canEdit() || state.pages.length <= 1;
   deletePageButton.title =
     state.pages.length <= 1
       ? "最後のページは削除できません"
-      : isOwner()
-        ? "現在のページを削除"
-        : "ページ削除はルーム所有者のみ実行できます";
+      : "現在のページを削除";
   addPageButton.disabled = !canEdit();
   editTitleButton.disabled = !canEdit();
   updateActionButtons();
@@ -785,22 +807,16 @@ function canEdit() {
   return state.joined && state.socket?.readyState === WebSocket.OPEN;
 }
 
-function isOwner() {
-  return state.users.get(state.selfId)?.role === "owner";
-}
-
 function setEditingEnabled(enabled) {
   memoInput.readOnly = !enabled;
   addPageButton.disabled = !enabled;
   editTitleButton.disabled = !enabled;
   importButton.disabled = !enabled;
   duplicatePageButton.disabled = !enabled;
-  movePageUpButton.disabled = !enabled;
-  movePageDownButton.disabled = !enabled;
   if (!enabled) {
     endTitleEditMode();
   }
-  deletePageButton.disabled = !enabled || !isOwner() || state.pages.length <= 1;
+  deletePageButton.disabled = !enabled || state.pages.length <= 1;
   updateActionButtons();
 }
 
@@ -819,15 +835,14 @@ function updateActionButtons() {
   exportButton.disabled = !joined;
   saveButton.disabled = !joined;
   importButton.disabled = !canEdit();
-  restorePageButton.disabled = !canEdit() || !isOwner() || state.deletedPageCount <= 0;
+  restorePageButton.disabled = !canEdit() || state.deletedPageCount <= 0;
   restorePageButton.title =
     state.deletedPageCount > 0 ? `${state.deletedPageCount}件の削除済みページを復元できます` : "復元できるページはありません";
   duplicatePageButton.disabled = !canEdit() || !currentPage();
-  const pageIndex = state.pages.findIndex((page) => page.id === state.activePageId);
-  movePageUpButton.disabled = !canEdit() || pageIndex <= 0;
-  movePageDownButton.disabled = !canEdit() || pageIndex === -1 || pageIndex >= state.pages.length - 1;
   previewButton.disabled = !state.joined;
-  previewButton.textContent = state.previewMode ? "Edit" : "Preview";
+  previewButton.textContent = state.previewMode ? "E" : "P";
+  previewButton.title = state.previewMode ? "編集に戻る" : "Preview";
+  previewButton.setAttribute("aria-label", previewButton.title);
 }
 
 function scheduleReconnect() {
@@ -936,16 +951,12 @@ function recoveryTitle(title) {
   return normalizeTitle(`${title || "Untitled"} recovery`, "Recovered memo");
 }
 
-function moveCurrentPage(direction) {
-  const page = currentPage();
-  if (!page || !canEdit()) return;
-  send({ type: "move-page", pageId: page.id, direction });
-}
-
 function renderPreview() {
   editorFrame.classList.toggle("is-preview", state.previewMode);
   previewPane.classList.toggle("hidden", !state.previewMode);
-  previewButton.textContent = state.previewMode ? "Edit" : "Preview";
+  previewButton.textContent = state.previewMode ? "E" : "P";
+  previewButton.title = state.previewMode ? "編集に戻る" : "Preview";
+  previewButton.setAttribute("aria-label", previewButton.title);
   if (!state.previewMode) return;
 
   const page = currentPage();
