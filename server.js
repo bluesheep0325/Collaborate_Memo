@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
 import { dirname, extname, join, normalize } from "node:path";
@@ -134,8 +134,14 @@ function serializeRoomForStorage(room) {
 
 async function loadRooms() {
   if (useSupabase) {
-    await cleanupSupabaseRooms();
-    await loadRoomsFromSupabase();
+    try {
+      await cleanupSupabaseRooms();
+      await loadRoomsFromSupabase();
+      lastStorageError = "";
+    } catch (error) {
+      lastStorageError = error.message;
+      console.error(`Failed to load Supabase memo data: ${error.message}`);
+    }
     return;
   }
 
@@ -185,7 +191,9 @@ async function saveRooms() {
     rooms: [...rooms.values()].map(serializeRoomForStorage)
   };
   await mkdir(dirname(dataFile), { recursive: true });
-  await writeFile(dataFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const tempFile = `${dataFile}.${process.pid}.tmp`;
+  await writeFile(tempFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  await rename(tempFile, dataFile);
   lastStorageError = "";
 }
 
@@ -378,6 +386,16 @@ server.on("upgrade", (request, socket) => {
   }
 
   const key = request.headers["sec-websocket-key"];
+  if (
+    request.headers["sec-websocket-version"] !== "13" ||
+    typeof key !== "string" ||
+    Buffer.from(key, "base64").length !== 16
+  ) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   const acceptKey = createHash("sha1")
     .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
     .digest("base64");
@@ -392,6 +410,9 @@ server.on("upgrade", (request, socket) => {
   socket.id = randomUUID();
   socket.wsReadyState = "open";
   socket.buffer = Buffer.alloc(0);
+  socket.fragmentOpcode = 0;
+  socket.fragmentChunks = [];
+  socket.fragmentBytes = 0;
   socket.send = (message) => writeFrame(socket, message);
   sockets.add(socket);
 
@@ -403,18 +424,24 @@ server.on("upgrade", (request, socket) => {
 function readFrames(socket, chunk) {
   socket.buffer = Buffer.concat([socket.buffer, chunk]);
   if (socket.buffer.length > maxFrameBytes) {
-    socket.end();
-    leave(socket);
+    closeWebSocket(socket, 1009, "message too large");
     return;
   }
 
   while (socket.buffer.length >= 2) {
     const first = socket.buffer[0];
     const second = socket.buffer[1];
+    const fin = (first & 0x80) === 0x80;
+    const rsv = first & 0x70;
     const opcode = first & 0x0f;
     const masked = (second & 0x80) === 0x80;
     let length = second & 0x7f;
     let offset = 2;
+
+    if (rsv !== 0 || !masked) {
+      closeWebSocket(socket, 1002, "protocol error");
+      return;
+    }
 
     if (length === 126) {
       if (socket.buffer.length < offset + 2) return;
@@ -425,31 +452,92 @@ function readFrames(socket, chunk) {
       length = Number(socket.buffer.readBigUInt64BE(offset));
       offset += 8;
     }
+    if (!Number.isSafeInteger(length) || length > maxFrameBytes) {
+      closeWebSocket(socket, 1009, "message too large");
+      return;
+    }
 
-    const maskOffset = masked ? 4 : 0;
+    if ((opcode & 0x08) !== 0 && (!fin || length > 125)) {
+      closeWebSocket(socket, 1002, "protocol error");
+      return;
+    }
+
+    const maskOffset = 4;
     if (socket.buffer.length < offset + maskOffset + length) return;
 
     let payload = socket.buffer.subarray(offset + maskOffset, offset + maskOffset + length);
-    if (masked) {
-      const mask = socket.buffer.subarray(offset, offset + 4);
-      payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
-    }
+    const mask = socket.buffer.subarray(offset, offset + 4);
+    payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
 
     socket.buffer = socket.buffer.subarray(offset + maskOffset + length);
 
     if (opcode === 0x8) {
-      socket.end();
-      leave(socket);
+      closeWebSocket(socket);
       return;
     }
     if (opcode === 0x9) {
       writeFrame(socket, payload, 0x0a);
       continue;
     }
+    if (opcode === 0x0) {
+      if (!socket.fragmentOpcode) {
+        closeWebSocket(socket, 1002, "unexpected continuation");
+        return;
+      }
+      if (!appendFragment(socket, payload)) return;
+      if (fin) {
+        const message = Buffer.concat(socket.fragmentChunks, socket.fragmentBytes);
+        const messageOpcode = socket.fragmentOpcode;
+        clearFragment(socket);
+        if (messageOpcode === 0x1) handleMessage(socket, message.toString("utf8"));
+      }
+      continue;
+    }
     if (opcode === 0x1) {
-      handleMessage(socket, payload.toString("utf8"));
+      if (socket.fragmentOpcode) {
+        closeWebSocket(socket, 1002, "fragment already open");
+        return;
+      }
+      if (fin) {
+        handleMessage(socket, payload.toString("utf8"));
+      } else {
+        socket.fragmentOpcode = opcode;
+        if (!appendFragment(socket, payload)) return;
+      }
+      continue;
+    }
+    if (opcode === 0x2) {
+      closeWebSocket(socket, 1003, "binary unsupported");
+      return;
     }
   }
+}
+
+function appendFragment(socket, payload) {
+  socket.fragmentBytes += payload.length;
+  if (socket.fragmentBytes > maxFrameBytes) {
+    closeWebSocket(socket, 1009, "message too large");
+    return false;
+  }
+  socket.fragmentChunks.push(payload);
+  return true;
+}
+
+function clearFragment(socket) {
+  socket.fragmentOpcode = 0;
+  socket.fragmentChunks = [];
+  socket.fragmentBytes = 0;
+}
+
+function closeWebSocket(socket, code = 1000, reason = "") {
+  if (socket.destroyed || socket.wsReadyState === "closed") return;
+  const reasonBytes = Buffer.from(reason).subarray(0, 123);
+  const payload = Buffer.alloc(2 + reasonBytes.length);
+  payload.writeUInt16BE(code, 0);
+  reasonBytes.copy(payload, 2);
+  writeFrame(socket, payload, 0x8);
+  socket.end();
+  leave(socket);
 }
 
 function writeFrame(socket, payload, opcode = 0x1) {
