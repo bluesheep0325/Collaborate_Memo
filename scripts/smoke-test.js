@@ -43,6 +43,10 @@ try {
   assert(rejected.error.reason === "invalid-password", "wrong password should be rejected");
   rejected.socket.close();
 
+  const invalidRoom = await connectClient("smoke room", "Mallory", password);
+  assert(invalidRoom.error.reason === "invalid-room-id", "invalid room IDs should be rejected");
+  invalidRoom.socket.close();
+
   const alice = await connectClient("smoke-room", "Alice", password);
   const bob = await connectClient("smoke-room", "Bob", password);
   const pageId = alice.joined.room.pages[0].id;
@@ -92,6 +96,16 @@ try {
   assert(cursorMessage.cursor.start === 1, "selection start should reach the other user");
   assert(cursorMessage.cursor.end === 5, "selection end should reach the other user");
 
+  const bobDuplicate = waitForMessage(bob.socket, (message) => message.type === "page-added", "bob duplicated page");
+  alice.socket.send(JSON.stringify({ type: "duplicate-page", pageId }));
+  const duplicateMessage = await bobDuplicate;
+  assert(duplicateMessage.page.text.length === largePaste.length, "duplicated page should keep text");
+
+  const bobReorder = waitForMessage(bob.socket, (message) => message.type === "pages-reordered", "bob pages reordered");
+  alice.socket.send(JSON.stringify({ type: "move-page", pageId: duplicateMessage.page.id, direction: "up" }));
+  const reorderMessage = await bobReorder;
+  assert(reorderMessage.pageIds[0] === duplicateMessage.page.id, "moved page should be reordered");
+
   const bobPage = waitForMessage(bob.socket, (message) => message.type === "page-added", "bob page-added");
   alice.socket.send(JSON.stringify({ type: "add-page", title: "Second page" }));
   const pageMessage = await bobPage;
@@ -102,10 +116,22 @@ try {
   const renameMessage = await aliceRename;
   assert(renameMessage.title === "Renamed page", "renamed page title should reach the other user");
 
-  const aliceDelete = waitForMessage(alice.socket, (message) => message.type === "page-deleted", "alice page-deleted");
+  const bobDenied = waitForMessage(bob.socket, (message) => message.type === "action-error", "bob delete denied");
   bob.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
+  const deniedMessage = await bobDenied;
+  assert(deniedMessage.reason === "owner-only", "non-owner page delete should be denied");
+
+  const aliceDelete = waitForMessage(alice.socket, (message) => message.type === "page-deleted", "alice page-deleted");
+  alice.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
   const deleteMessage = await aliceDelete;
   assert(deleteMessage.pageId === pageMessage.page.id, "deleted page should reach the other user");
+  assert(deleteMessage.deletedPageCount === 1, "deleted page count should be broadcast");
+
+  const bobRestore = waitForMessage(bob.socket, (message) => message.type === "page-restored", "bob page-restored");
+  alice.socket.send(JSON.stringify({ type: "restore-page" }));
+  const restoreMessage = await bobRestore;
+  assert(restoreMessage.page.title === "Second page", "restored page should keep its title");
+  assert(restoreMessage.deletedPageCount === 0, "restored page should update deleted count");
 
   alice.socket.close();
   bob.socket.close();

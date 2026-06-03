@@ -8,14 +8,26 @@ const entryError = document.querySelector("#entryError");
 const roomLabel = document.querySelector("#roomLabel");
 const pageList = document.querySelector("#pageList");
 const addPageButton = document.querySelector("#addPageButton");
+const pageSearchInput = document.querySelector("#pageSearchInput");
 const pageTitleInput = document.querySelector("#pageTitleInput");
 const editTitleButton = document.querySelector("#editTitleButton");
 const statusText = document.querySelector("#statusText");
 const userList = document.querySelector("#userList");
+const shareButton = document.querySelector("#shareButton");
+const movePageUpButton = document.querySelector("#movePageUpButton");
+const movePageDownButton = document.querySelector("#movePageDownButton");
+const duplicatePageButton = document.querySelector("#duplicatePageButton");
+const previewButton = document.querySelector("#previewButton");
+const restorePageButton = document.querySelector("#restorePageButton");
+const importButton = document.querySelector("#importButton");
+const exportButton = document.querySelector("#exportButton");
 const deletePageButton = document.querySelector("#deletePageButton");
 const saveButton = document.querySelector("#saveButton");
 const leaveButton = document.querySelector("#leaveButton");
+const importFileInput = document.querySelector("#importFileInput");
 const memoInput = document.querySelector("#memoInput");
+const editorFrame = document.querySelector(".editor-frame");
+const previewPane = document.querySelector("#previewPane");
 const cursorLayer = document.querySelector("#cursorLayer");
 const sessionKey = "collaborate-memo-session";
 
@@ -28,18 +40,24 @@ const state = {
   activePageId: "",
   pages: [],
   users: new Map(),
+  deletedPageCount: 0,
+  searchQuery: "",
+  previewMode: false,
   lastValue: "",
   titleTimer: null,
   titleBeforeEdit: "",
   localSequence: 0,
   reconnectTimer: null,
   heartbeatTimer: null,
+  noticeTimer: null,
   reconnectAttempts: 0,
   joined: false,
   leaving: false,
   forceNextInputReplace: false,
   composing: false,
   pendingOps: new Map(),
+  pendingRecoveries: new Map(),
+  recoveryCounter: 0,
   maxPageChars: 0
 };
 
@@ -60,18 +78,85 @@ joinForm.addEventListener("submit", (event) => {
 });
 
 addPageButton.addEventListener("click", () => {
+  if (!canEdit()) return;
   send({ type: "add-page", title: `Page ${state.pages.length + 1}` });
 });
 
 deletePageButton.addEventListener("click", () => {
+  if (!canEdit()) return;
   const page = currentPage();
   if (!page || state.pages.length <= 1) return;
+  if (!isOwner()) {
+    showNotice("ページ削除はルーム所有者のみ実行できます。", "error");
+    return;
+  }
+  if (!confirm(`「${page.title}」を削除しますか？この操作は元に戻せません。`)) return;
   send({ type: "delete-page", pageId: page.id });
 });
 
 leaveButton.addEventListener("click", leaveRoom);
 
+pageSearchInput.addEventListener("input", () => {
+  state.searchQuery = pageSearchInput.value.trim().toLowerCase();
+  renderPages();
+});
+
+shareButton.addEventListener("click", async () => {
+  if (!state.roomId) return;
+  const url = new URL(location.href);
+  url.searchParams.set("room", state.roomId);
+  try {
+    await navigator.clipboard.writeText(url.href);
+    showNotice("共有リンクをコピーしました。", "online");
+  } catch {
+    prompt("共有リンク", url.href);
+  }
+});
+
+restorePageButton.addEventListener("click", () => {
+  if (!canEdit()) return;
+  if (!isOwner()) {
+    showNotice("ページ復元はルーム所有者のみ実行できます。", "error");
+    return;
+  }
+  send({ type: "restore-page" });
+});
+
+movePageUpButton.addEventListener("click", () => {
+  moveCurrentPage("up");
+});
+
+movePageDownButton.addEventListener("click", () => {
+  moveCurrentPage("down");
+});
+
+duplicatePageButton.addEventListener("click", () => {
+  const page = currentPage();
+  if (!page || !canEdit()) return;
+  send({ type: "duplicate-page", pageId: page.id });
+});
+
+previewButton.addEventListener("click", () => {
+  state.previewMode = !state.previewMode;
+  renderPreview();
+});
+
+exportButton.addEventListener("click", exportAllPages);
+
+importButton.addEventListener("click", () => {
+  if (!canEdit()) return;
+  importFileInput.click();
+});
+
+importFileInput.addEventListener("change", async () => {
+  const file = importFileInput.files?.[0];
+  importFileInput.value = "";
+  if (!file) return;
+  await importPagesFromFile(file);
+});
+
 editTitleButton.addEventListener("click", () => {
+  if (!canEdit()) return;
   if (pageTitleInput.readOnly) {
     beginTitleEdit();
   } else {
@@ -117,6 +202,7 @@ memoInput.addEventListener("input", (event) => {
   const nextValue = memoInput.value;
   if (state.composing || event.isComposing) {
     page.text = nextValue;
+    renderPreview();
     return;
   }
 
@@ -136,6 +222,7 @@ memoInput.addEventListener("input", (event) => {
 
   page.text = nextValue;
   state.lastValue = nextValue;
+  renderPreview();
   page.version += 1;
   state.localSequence += 1;
   rememberPendingOp(page.id, state.localSequence, op);
@@ -177,6 +264,7 @@ memoInput.addEventListener("compositionend", () => {
 
   page.text = nextValue;
   state.lastValue = nextValue;
+  renderPreview();
   page.version += 1;
   state.localSequence += 1;
   rememberPendingOp(page.id, state.localSequence, op);
@@ -256,10 +344,12 @@ function send(message) {
 
 function handleMessage(message) {
   if (message.type === "joined") {
+    const drafts = collectUnsyncedDrafts();
     state.selfId = message.selfId;
     state.activePageId = message.room.activePageId;
     state.pages = message.room.pages;
     state.users = new Map(message.room.users.map((user) => [user.id, user]));
+    state.deletedPageCount = Number(message.room.deletedPageCount) || 0;
     state.pendingOps = new Map();
     state.maxPageChars = Number(message.limits?.maxPageChars) || 0;
     state.joined = true;
@@ -272,6 +362,7 @@ function handleMessage(message) {
     setStatus("online");
     switchPage(state.activePageId, false);
     renderAll();
+    recoverUnsyncedDrafts(drafts);
   }
 
   if (message.type === "join-error") {
@@ -283,8 +374,10 @@ function handleMessage(message) {
     memoView.classList.add("hidden");
     const errorLabels = {
       "invalid-password": "合言葉が違います。",
+      "invalid-room-id": "ルームIDに使える文字は、文字・数字・_・- のみです。",
       "room-full": "このルームは満員です。",
-      "server-full": "作成できるルーム数の上限に達しています。"
+      "server-full": "作成できるルーム数の上限に達しています。",
+      "rate-limited": "入室試行が多すぎます。少し待ってください。"
     };
     entryError.textContent = errorLabels[message.reason] || "入室できませんでした。";
     setStatus("offline");
@@ -301,12 +394,22 @@ function handleMessage(message) {
     renderCursors();
   }
 
+  if (message.type === "user-updated") {
+    state.users.set(message.user.id, message.user);
+    renderUsers();
+    renderPages();
+  }
+
   if (message.type === "page-op") {
     receivePageOp(message);
   }
 
   if (message.type === "page-replace") {
     receivePageReplace(message);
+  }
+
+  if (message.type === "page-rejected") {
+    receivePageRejected(message);
   }
 
   if (message.type === "cursor") {
@@ -322,11 +425,13 @@ function handleMessage(message) {
     state.pages.push(message.page);
     state.activePageId = message.page.id;
     switchPage(message.page.id, false);
+    finishPendingRecovery(message);
     renderAll();
   }
 
   if (message.type === "page-deleted") {
     state.pages = state.pages.filter((page) => page.id !== message.pageId);
+    state.deletedPageCount = Number(message.deletedPageCount) || state.deletedPageCount;
     if (state.pages.length === 0) return;
     const nextPageId = state.pages.some((page) => page.id === state.activePageId)
       ? state.activePageId
@@ -345,6 +450,32 @@ function handleMessage(message) {
       }
       renderPages();
     }
+  }
+
+  if (message.type === "pages-reordered") {
+    const pagesById = new Map(state.pages.map((page) => [page.id, page]));
+    state.pages = message.pageIds.map((pageId) => pagesById.get(pageId)).filter(Boolean);
+    state.activePageId = state.pages.some((page) => page.id === state.activePageId)
+      ? state.activePageId
+      : message.activePageId || state.pages[0]?.id || "";
+    renderPages();
+  }
+
+  if (message.type === "page-restored") {
+    state.pages.push(message.page);
+    state.deletedPageCount = Number(message.deletedPageCount) || 0;
+    switchPage(message.page.id, false);
+    renderAll();
+  }
+
+  if (message.type === "action-error") {
+    const labels = {
+      "page-limit": "ページ数の上限に達しています。",
+      "owner-only": "この操作はルーム所有者のみ実行できます。",
+      "last-page": "最後のページは削除できません。",
+      "nothing-to-restore": "復元できるページがありません。"
+    };
+    showNotice(labels[message.reason] || "操作を完了できませんでした。", "error");
   }
 }
 
@@ -371,6 +502,7 @@ function receivePageOp(message) {
     memoInput.value = page.text;
     state.lastValue = page.text;
     memoInput.setSelectionRange(selectionStart, selectionEnd);
+    renderPreview();
     renderCursors();
   }
 }
@@ -397,7 +529,36 @@ function receivePageReplace(message) {
     memoInput.value = page.text;
     state.lastValue = page.text;
     memoInput.setSelectionRange(cursorPosition, cursorPosition);
+    renderPreview();
     renderCursors();
+  }
+}
+
+function receivePageRejected(message) {
+  const page = state.pages.find((item) => item.id === message.pageId);
+  if (!page) return;
+
+  const draft = {
+    sourcePageId: page.id,
+    title: recoveryTitle(page.title),
+    text: page.text
+  };
+
+  forgetPendingOp(page.id, message.sequence);
+  page.text = message.text;
+  page.version = Number(message.version) || 0;
+  state.lastValue = page.id === state.activePageId ? message.text : state.lastValue;
+
+  if (page.id === state.activePageId) {
+    const cursorPosition = Math.min(memoInput.selectionStart, page.text.length);
+    memoInput.value = page.text;
+    memoInput.setSelectionRange(cursorPosition, cursorPosition);
+    renderPreview();
+    renderCursors();
+  }
+
+  if (draft.text !== page.text) {
+    queueRecoveryDraft(draft);
   }
 }
 
@@ -408,8 +569,11 @@ function renderAll() {
 }
 
 function renderPages() {
+  const visiblePages = state.searchQuery
+    ? state.pages.filter((page) => `${page.title}\n${page.text}`.toLowerCase().includes(state.searchQuery))
+    : state.pages;
   pageList.replaceChildren(
-    ...state.pages.map((page) => {
+    ...visiblePages.map((page) => {
       const button = document.createElement("button");
       button.className = `page-item${page.id === state.activePageId ? " active" : ""}`;
       button.type = "button";
@@ -418,8 +582,16 @@ function renderPages() {
       return button;
     })
   );
-  deletePageButton.disabled = state.pages.length <= 1;
-  deletePageButton.title = state.pages.length <= 1 ? "最後のページは削除できません" : "現在のページを削除";
+  deletePageButton.disabled = !canEdit() || !isOwner() || state.pages.length <= 1;
+  deletePageButton.title =
+    state.pages.length <= 1
+      ? "最後のページは削除できません"
+      : isOwner()
+        ? "現在のページを削除"
+        : "ページ削除はルーム所有者のみ実行できます";
+  addPageButton.disabled = !canEdit();
+  editTitleButton.disabled = !canEdit();
+  updateActionButtons();
 }
 
 function renderUsers() {
@@ -435,7 +607,10 @@ function renderUsers() {
       dot.className = "user-dot";
       const name = document.createElement("span");
       name.className = "user-name";
-      name.textContent = user.id === state.selfId ? `${user.name} (自分)` : user.name;
+      const suffixes = [];
+      if (user.id === state.selfId) suffixes.push("自分");
+      if (user.role === "owner") suffixes.push("所有者");
+      name.textContent = suffixes.length ? `${user.name} (${suffixes.join(", ")})` : user.name;
 
       pill.append(dot, name);
       return pill;
@@ -534,6 +709,7 @@ function switchPage(pageId, notify) {
   endTitleEditMode();
   memoInput.value = page.text;
   state.lastValue = page.text;
+  renderPreview();
   renderAll();
   memoInput.focus();
 
@@ -549,7 +725,7 @@ function currentPage() {
 
 function beginTitleEdit() {
   const page = currentPage();
-  if (!page) return;
+  if (!page || !canEdit()) return;
 
   state.titleBeforeEdit = page.title;
   pageTitleInput.readOnly = false;
@@ -602,6 +778,56 @@ function setStatus(status) {
 
   statusText.textContent = labels[status] || labels.offline;
   statusText.className = `status is-${status}`;
+  setEditingEnabled(status === "online");
+}
+
+function canEdit() {
+  return state.joined && state.socket?.readyState === WebSocket.OPEN;
+}
+
+function isOwner() {
+  return state.users.get(state.selfId)?.role === "owner";
+}
+
+function setEditingEnabled(enabled) {
+  memoInput.readOnly = !enabled;
+  addPageButton.disabled = !enabled;
+  editTitleButton.disabled = !enabled;
+  importButton.disabled = !enabled;
+  duplicatePageButton.disabled = !enabled;
+  movePageUpButton.disabled = !enabled;
+  movePageDownButton.disabled = !enabled;
+  if (!enabled) {
+    endTitleEditMode();
+  }
+  deletePageButton.disabled = !enabled || !isOwner() || state.pages.length <= 1;
+  updateActionButtons();
+}
+
+function showNotice(text, status = "error") {
+  clearTimeout(state.noticeTimer);
+  statusText.textContent = text;
+  statusText.className = `status is-${status}`;
+  state.noticeTimer = setTimeout(() => {
+    setStatus(canEdit() ? "online" : "offline");
+  }, 3500);
+}
+
+function updateActionButtons() {
+  const joined = state.joined && state.pages.length > 0;
+  shareButton.disabled = !state.roomId;
+  exportButton.disabled = !joined;
+  saveButton.disabled = !joined;
+  importButton.disabled = !canEdit();
+  restorePageButton.disabled = !canEdit() || !isOwner() || state.deletedPageCount <= 0;
+  restorePageButton.title =
+    state.deletedPageCount > 0 ? `${state.deletedPageCount}件の削除済みページを復元できます` : "復元できるページはありません";
+  duplicatePageButton.disabled = !canEdit() || !currentPage();
+  const pageIndex = state.pages.findIndex((page) => page.id === state.activePageId);
+  movePageUpButton.disabled = !canEdit() || pageIndex <= 0;
+  movePageDownButton.disabled = !canEdit() || pageIndex === -1 || pageIndex >= state.pages.length - 1;
+  previewButton.disabled = !state.joined;
+  previewButton.textContent = state.previewMode ? "Edit" : "Preview";
 }
 
 function scheduleReconnect() {
@@ -646,6 +872,7 @@ function replacePageText(page, text) {
 
   page.text = nextText;
   state.lastValue = nextText;
+  renderPreview();
   page.version += 1;
   state.localSequence += 1;
   clearPendingOps(page.id);
@@ -660,6 +887,191 @@ function replacePageText(page, text) {
     cursor: localCursorPayload()
   });
   sendCursor();
+}
+
+function collectUnsyncedDrafts() {
+  const drafts = [];
+  for (const [pageId, pending] of state.pendingOps) {
+    if (!pending.length) continue;
+    const page = state.pages.find((item) => item.id === pageId);
+    if (!page) continue;
+    drafts.push({
+      sourcePageId: page.id,
+      title: recoveryTitle(page.title),
+      text: page.text
+    });
+  }
+  return drafts;
+}
+
+function recoverUnsyncedDrafts(drafts) {
+  for (const draft of drafts) {
+    const serverPage = state.pages.find((page) => page.id === draft.sourcePageId);
+    if (!serverPage || serverPage.text !== draft.text) {
+      queueRecoveryDraft(draft);
+    }
+  }
+}
+
+function queueRecoveryDraft(draft) {
+  if (draft.text == null) return;
+  const requestId = `recovery-${Date.now()}-${state.recoveryCounter}`;
+  state.recoveryCounter += 1;
+  state.pendingRecoveries.set(requestId, draft);
+  send({ type: "add-page", title: draft.title, requestId });
+}
+
+function finishPendingRecovery(message) {
+  if (!message.requestId || message.userId !== state.selfId) return;
+  const draft = state.pendingRecoveries.get(message.requestId);
+  if (!draft) return;
+  state.pendingRecoveries.delete(message.requestId);
+  const page = state.pages.find((item) => item.id === message.page.id);
+  if (!page) return;
+  switchPage(page.id, false);
+  replacePageText(page, draft.text);
+}
+
+function recoveryTitle(title) {
+  return normalizeTitle(`${title || "Untitled"} recovery`, "Recovered memo");
+}
+
+function moveCurrentPage(direction) {
+  const page = currentPage();
+  if (!page || !canEdit()) return;
+  send({ type: "move-page", pageId: page.id, direction });
+}
+
+function renderPreview() {
+  editorFrame.classList.toggle("is-preview", state.previewMode);
+  previewPane.classList.toggle("hidden", !state.previewMode);
+  previewButton.textContent = state.previewMode ? "Edit" : "Preview";
+  if (!state.previewMode) return;
+
+  const page = currentPage();
+  previewPane.replaceChildren(...markdownNodes(page?.text || ""));
+}
+
+function markdownNodes(text) {
+  const nodes = [];
+  let list = null;
+  let codeBlock = null;
+
+  function finishList() {
+    if (list) {
+      nodes.push(list);
+      list = null;
+    }
+  }
+
+  function finishCode() {
+    if (codeBlock) {
+      nodes.push(codeBlock);
+      codeBlock = null;
+    }
+  }
+
+  for (const line of text.split("\n")) {
+    if (line.startsWith("```")) {
+      if (codeBlock) {
+        finishCode();
+      } else {
+        finishList();
+        codeBlock = document.createElement("pre");
+      }
+      continue;
+    }
+
+    if (codeBlock) {
+      codeBlock.textContent += `${line}\n`;
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      finishList();
+      const element = document.createElement(`h${heading[1].length}`);
+      element.textContent = heading[2];
+      nodes.push(element);
+      continue;
+    }
+
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      if (!list) list = document.createElement("ul");
+      const item = document.createElement("li");
+      item.textContent = bullet[1];
+      list.append(item);
+      continue;
+    }
+
+    if (!line.trim()) {
+      finishList();
+      continue;
+    }
+
+    finishList();
+    const paragraph = document.createElement("p");
+    paragraph.textContent = line;
+    nodes.push(paragraph);
+  }
+
+  finishList();
+  finishCode();
+  return nodes.length ? nodes : [document.createElement("p")];
+}
+
+function exportAllPages() {
+  if (!state.pages.length) return;
+  const payload = {
+    app: "Collaborate Memo",
+    exportedAt: new Date().toISOString(),
+    roomId: state.roomId,
+    activePageId: state.activePageId,
+    pages: state.pages.map(({ title, text }) => ({ title, text }))
+  };
+  downloadText(`${safeFileName(state.roomId || "memo")}.json`, JSON.stringify(payload, null, 2), "application/json;charset=utf-8");
+}
+
+async function importPagesFromFile(file) {
+  if (!canEdit()) return;
+  const text = await file.text();
+  let importedPages = null;
+
+  try {
+    const data = JSON.parse(text);
+    if (Array.isArray(data.pages)) {
+      importedPages = data.pages.map((page, index) => ({
+        title: normalizeTitle(page.title, `Imported ${index + 1}`),
+        text: String(page.text || "")
+      }));
+    }
+  } catch {
+    importedPages = null;
+  }
+
+  if (!importedPages) {
+    importedPages = [{ title: normalizeTitle(file.name.replace(/\.[^.]+$/, ""), "Imported memo"), text }];
+  }
+
+  for (const page of importedPages.slice(0, 20)) {
+    queueRecoveryDraft(page);
+  }
+  showNotice(`${Math.min(importedPages.length, 20)}ページを読み込みました。`, "online");
+}
+
+function downloadText(fileName, text, type) {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function safeFileName(name) {
+  return String(name || "memo").replace(/[\\/:*?"<>|]/g, "_") || "memo";
 }
 
 function localCursorPayload() {
@@ -711,12 +1123,17 @@ function leaveRoom() {
   state.activePageId = "";
   state.pages = [];
   state.users = new Map();
+  state.deletedPageCount = 0;
+  state.searchQuery = "";
+  state.previewMode = false;
+  pageSearchInput.value = "";
   state.lastValue = "";
   state.composing = false;
   state.pendingOps = new Map();
   entryError.textContent = "";
   memoView.classList.add("hidden");
   entryView.classList.remove("hidden");
+  renderPreview();
   setStatus("offline");
 }
 

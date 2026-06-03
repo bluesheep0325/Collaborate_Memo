@@ -1,9 +1,9 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { networkInterfaces } from "node:os";
-import { dirname, extname, join, normalize } from "node:path";
+import { dirname, extname, isAbsolute, join, normalize, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
@@ -23,6 +23,8 @@ const maxUsersPerRoom = Number(process.env.MAX_USERS_PER_ROOM || 10);
 const maxPagesPerRoom = Number(process.env.MAX_PAGES_PER_ROOM || 50);
 const maxPageChars = Number(process.env.MAX_PAGE_CHARS || 200000);
 const maxFrameBytes = Number(process.env.MAX_FRAME_BYTES || Math.max(1024 * 1024, maxPageChars * 4 + 16384));
+const maxMessagesPerMinute = Number(process.env.MAX_MESSAGES_PER_MINUTE || 240);
+const maxJoinAttemptsPerMinute = Number(process.env.MAX_JOIN_ATTEMPTS_PER_MINUTE || 30);
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -42,11 +44,13 @@ const securityHeaders = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
   "referrer-policy": "no-referrer",
-  "permissions-policy": "camera=(), microphone=(), geolocation=()"
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+  "content-security-policy": "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 };
 
 const rooms = new Map();
 const sockets = new Set();
+const joinAttempts = new Map();
 const colorPalette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c"];
 
 function createPage(title = "Page 1") {
@@ -61,17 +65,31 @@ function createPage(title = "Page 1") {
 
 function getRoom(roomId) {
   if (!rooms.has(roomId)) {
+    pruneBlankEmptyRooms();
     if (rooms.size >= maxRooms) return null;
     const firstPage = createPage("Page 1");
     rooms.set(roomId, {
       id: roomId,
       pages: [firstPage],
       activePageId: firstPage.id,
-      users: new Map()
+      users: new Map(),
+      ownerId: "",
+      deletedPages: []
     });
     scheduleSave();
   }
   return rooms.get(roomId);
+}
+
+function pruneBlankEmptyRooms() {
+  for (const [roomId, room] of rooms) {
+    const isBlank =
+      room.users.size === 0 &&
+      room.pages.length === 1 &&
+      room.pages[0].text.length === 0 &&
+      (room.deletedPages?.length || 0) === 0;
+    if (isBlank) rooms.delete(roomId);
+  }
 }
 
 function safeRoomId(value) {
@@ -116,7 +134,8 @@ function serializeRoom(room) {
     id: room.id,
     activePageId: room.activePageId,
     pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version })),
-    users: [...room.users.values()]
+    users: [...room.users.values()],
+    deletedPageCount: room.deletedPages?.length || 0
   };
 }
 
@@ -128,14 +147,21 @@ function serializeRoomForStorage(room) {
   return {
     id: room.id,
     activePageId: room.activePageId,
-    pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version }))
+    pages: room.pages.map(({ id, title, text, version }) => ({ id, title, text, version })),
+    deletedPages: (room.deletedPages || []).map(({ id, title, text, version }) => ({ id, title, text, version }))
   };
 }
 
 async function loadRooms() {
   if (useSupabase) {
-    await cleanupSupabaseRooms();
-    await loadRoomsFromSupabase();
+    try {
+      await cleanupSupabaseRooms();
+      await loadRoomsFromSupabase();
+      lastStorageError = "";
+    } catch (error) {
+      lastStorageError = error.message;
+      console.error(`Failed to load Supabase memo data: ${error.message}`);
+    }
     return;
   }
 
@@ -153,7 +179,9 @@ async function loadRooms() {
         id: roomData.id,
         pages,
         activePageId: roomData.activePageId || pages[0].id,
-        users: new Map()
+        users: new Map(),
+        ownerId: "",
+        deletedPages: Array.isArray(roomData.deletedPages) ? roomData.deletedPages.slice(-20) : []
       });
     }
   } catch (error) {
@@ -185,7 +213,9 @@ async function saveRooms() {
     rooms: [...rooms.values()].map(serializeRoomForStorage)
   };
   await mkdir(dirname(dataFile), { recursive: true });
-  await writeFile(dataFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const tempFile = `${dataFile}.${process.pid}.tmp`;
+  await writeFile(tempFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  await rename(tempFile, dataFile);
   lastStorageError = "";
 }
 
@@ -211,7 +241,9 @@ async function loadRoomsFromSupabase() {
       id: row.room_id,
       pages,
       activePageId: row.active_page_id || pages[0].id,
-      users: new Map()
+      users: new Map(),
+      ownerId: "",
+      deletedPages: []
     });
   }
 }
@@ -345,10 +377,8 @@ function serveStatic(request, response) {
     return;
   }
 
-  const requestedPath = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  const resolvedPath = normalize(join(publicDir, requestedPath));
-
-  if (!resolvedPath.startsWith(publicDir) || !existsSync(resolvedPath)) {
+  const resolvedPath = resolvePublicPath(url.pathname);
+  if (!resolvedPath || !existsSync(resolvedPath)) {
     response.writeHead(404, withSecurityHeaders({ "content-type": "text/plain; charset=utf-8" }));
     response.end("Not found");
     return;
@@ -362,6 +392,20 @@ function serveStatic(request, response) {
     })
   );
   createReadStream(resolvedPath).pipe(response);
+}
+
+function resolvePublicPath(pathname) {
+  let requestedPath;
+  try {
+    requestedPath = pathname === "/" ? "/index.html" : decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+
+  const resolvedPath = normalize(join(publicDir, requestedPath));
+  const publicRelativePath = relative(publicDir, resolvedPath);
+  if (publicRelativePath.startsWith("..") || isAbsolute(publicRelativePath)) return null;
+  return resolvedPath;
 }
 
 const server = createServer(serveStatic);
@@ -378,6 +422,16 @@ server.on("upgrade", (request, socket) => {
   }
 
   const key = request.headers["sec-websocket-key"];
+  if (
+    request.headers["sec-websocket-version"] !== "13" ||
+    typeof key !== "string" ||
+    Buffer.from(key, "base64").length !== 16
+  ) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   const acceptKey = createHash("sha1")
     .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
     .digest("base64");
@@ -390,8 +444,14 @@ server.on("upgrade", (request, socket) => {
   );
 
   socket.id = randomUUID();
+  socket.ip = request.socket.remoteAddress || "unknown";
   socket.wsReadyState = "open";
   socket.buffer = Buffer.alloc(0);
+  socket.fragmentOpcode = 0;
+  socket.fragmentChunks = [];
+  socket.fragmentBytes = 0;
+  socket.rateWindowStartedAt = Date.now();
+  socket.rateCount = 0;
   socket.send = (message) => writeFrame(socket, message);
   sockets.add(socket);
 
@@ -403,18 +463,24 @@ server.on("upgrade", (request, socket) => {
 function readFrames(socket, chunk) {
   socket.buffer = Buffer.concat([socket.buffer, chunk]);
   if (socket.buffer.length > maxFrameBytes) {
-    socket.end();
-    leave(socket);
+    closeWebSocket(socket, 1009, "message too large");
     return;
   }
 
   while (socket.buffer.length >= 2) {
     const first = socket.buffer[0];
     const second = socket.buffer[1];
+    const fin = (first & 0x80) === 0x80;
+    const rsv = first & 0x70;
     const opcode = first & 0x0f;
     const masked = (second & 0x80) === 0x80;
     let length = second & 0x7f;
     let offset = 2;
+
+    if (rsv !== 0 || !masked) {
+      closeWebSocket(socket, 1002, "protocol error");
+      return;
+    }
 
     if (length === 126) {
       if (socket.buffer.length < offset + 2) return;
@@ -425,31 +491,92 @@ function readFrames(socket, chunk) {
       length = Number(socket.buffer.readBigUInt64BE(offset));
       offset += 8;
     }
+    if (!Number.isSafeInteger(length) || length > maxFrameBytes) {
+      closeWebSocket(socket, 1009, "message too large");
+      return;
+    }
 
-    const maskOffset = masked ? 4 : 0;
+    if ((opcode & 0x08) !== 0 && (!fin || length > 125)) {
+      closeWebSocket(socket, 1002, "protocol error");
+      return;
+    }
+
+    const maskOffset = 4;
     if (socket.buffer.length < offset + maskOffset + length) return;
 
     let payload = socket.buffer.subarray(offset + maskOffset, offset + maskOffset + length);
-    if (masked) {
-      const mask = socket.buffer.subarray(offset, offset + 4);
-      payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
-    }
+    const mask = socket.buffer.subarray(offset, offset + 4);
+    payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
 
     socket.buffer = socket.buffer.subarray(offset + maskOffset + length);
 
     if (opcode === 0x8) {
-      socket.end();
-      leave(socket);
+      closeWebSocket(socket);
       return;
     }
     if (opcode === 0x9) {
       writeFrame(socket, payload, 0x0a);
       continue;
     }
+    if (opcode === 0x0) {
+      if (!socket.fragmentOpcode) {
+        closeWebSocket(socket, 1002, "unexpected continuation");
+        return;
+      }
+      if (!appendFragment(socket, payload)) return;
+      if (fin) {
+        const message = Buffer.concat(socket.fragmentChunks, socket.fragmentBytes);
+        const messageOpcode = socket.fragmentOpcode;
+        clearFragment(socket);
+        if (messageOpcode === 0x1) handleMessage(socket, message.toString("utf8"));
+      }
+      continue;
+    }
     if (opcode === 0x1) {
-      handleMessage(socket, payload.toString("utf8"));
+      if (socket.fragmentOpcode) {
+        closeWebSocket(socket, 1002, "fragment already open");
+        return;
+      }
+      if (fin) {
+        handleMessage(socket, payload.toString("utf8"));
+      } else {
+        socket.fragmentOpcode = opcode;
+        if (!appendFragment(socket, payload)) return;
+      }
+      continue;
+    }
+    if (opcode === 0x2) {
+      closeWebSocket(socket, 1003, "binary unsupported");
+      return;
     }
   }
+}
+
+function appendFragment(socket, payload) {
+  socket.fragmentBytes += payload.length;
+  if (socket.fragmentBytes > maxFrameBytes) {
+    closeWebSocket(socket, 1009, "message too large");
+    return false;
+  }
+  socket.fragmentChunks.push(payload);
+  return true;
+}
+
+function clearFragment(socket) {
+  socket.fragmentOpcode = 0;
+  socket.fragmentChunks = [];
+  socket.fragmentBytes = 0;
+}
+
+function closeWebSocket(socket, code = 1000, reason = "") {
+  if (socket.destroyed || socket.wsReadyState === "closed") return;
+  const reasonBytes = Buffer.from(reason).subarray(0, 123);
+  const payload = Buffer.alloc(2 + reasonBytes.length);
+  payload.writeUInt16BE(code, 0);
+  reasonBytes.copy(payload, 2);
+  writeFrame(socket, payload, 0x8);
+  socket.end();
+  leave(socket);
 }
 
 function writeFrame(socket, payload, opcode = 0x1) {
@@ -483,6 +610,11 @@ function handleMessage(socket, raw) {
     return;
   }
 
+  if (isSocketRateLimited(socket)) {
+    closeWebSocket(socket, 1008, "rate limit exceeded");
+    return;
+  }
+
   if (process.env.DEBUG_WS) console.error("Websocket message:", message.type);
 
   if (message.type === "join") {
@@ -498,20 +630,35 @@ function handleMessage(socket, raw) {
   if (message.type === "page-replace") handlePageReplace(socket, room, message);
   if (message.type === "cursor") handleCursor(socket, room, message);
   if (message.type === "add-page") handleAddPage(socket, room, message);
+  if (message.type === "duplicate-page") handleDuplicatePage(socket, room, message);
+  if (message.type === "move-page") handleMovePage(socket, room, message);
   if (message.type === "delete-page") handleDeletePage(socket, room, message);
+  if (message.type === "restore-page") handleRestorePage(socket, room);
   if (message.type === "rename-page") handleRenamePage(socket, room, message);
   if (message.type === "switch-page") handleSwitchPage(socket, room, message);
   if (message.type === "heartbeat") socket.send(JSON.stringify({ type: "heartbeat" }));
 }
 
 function joinRoom(socket, message) {
+  if (isJoinRateLimited(socket.ip)) {
+    socket.send(JSON.stringify({ type: "join-error", reason: "rate-limited" }));
+    setTimeout(() => socket.end(), 50);
+    return;
+  }
+
   if (!passwordMatches(message.password)) {
     socket.send(JSON.stringify({ type: "join-error", reason: "invalid-password" }));
     setTimeout(() => socket.end(), 50);
     return;
   }
 
-  const roomId = safeRoomId(message.roomId) || "default";
+  const rawRoomId = String(message.roomId || "").trim() || "default";
+  const roomId = safeRoomId(rawRoomId);
+  if (!roomId || roomId !== rawRoomId) {
+    socket.send(JSON.stringify({ type: "join-error", reason: "invalid-room-id" }));
+    setTimeout(() => socket.end(), 50);
+    return;
+  }
   const room = getRoom(roomId);
   if (!room) {
     socket.send(JSON.stringify({ type: "join-error", reason: "server-full" }));
@@ -524,11 +671,15 @@ function joinRoom(socket, message) {
     return;
   }
 
-  const colorIndex = room.users.size % colorPalette.length;
+  if (!room.ownerId || room.users.size === 0) {
+    room.ownerId = socket.id;
+  }
+  const colorIndex = room.users.size;
   const user = {
     id: socket.id,
     name: String(message.userName || "Guest").trim().slice(0, 24) || "Guest",
-    color: colorPalette[colorIndex],
+    color: colorForIndex(colorIndex),
+    role: socket.id === room.ownerId ? "owner" : "editor",
     cursor: { pageId: room.activePageId, index: 0, start: 0, end: 0 },
     activePageId: room.activePageId
   };
@@ -594,6 +745,21 @@ function handlePageReplace(socket, room, message) {
   const page = room.pages.find((item) => item.id === message.pageId);
   if (!page || typeof message.text !== "string") return;
 
+  const baseVersion = Number(message.baseVersion);
+  if (Number.isFinite(baseVersion) && baseVersion < page.version) {
+    socket.send(
+      JSON.stringify({
+        type: "page-rejected",
+        reason: "stale-replace",
+        pageId: page.id,
+        text: page.text,
+        version: page.version,
+        sequence: message.sequence
+      })
+    );
+    return;
+  }
+
   page.text = message.text.slice(0, maxPageChars);
   page.version += 1;
   page.history = [];
@@ -627,22 +793,78 @@ function handleCursor(socket, room, message) {
 }
 
 function handleAddPage(socket, room, message) {
-  if (room.pages.length >= maxPagesPerRoom) return;
+  if (room.pages.length >= maxPagesPerRoom) {
+    socket.send(JSON.stringify({ type: "action-error", action: "add-page", reason: "page-limit" }));
+    return;
+  }
 
   const page = createPage(String(message.title || `Page ${room.pages.length + 1}`).slice(0, 40));
   room.pages.push(page);
   room.activePageId = page.id;
   scheduleSave();
-  broadcast(room, { type: "page-added", page: { id: page.id, title: page.title, text: "", version: 0 } });
+  broadcast(room, {
+    type: "page-added",
+    page: { id: page.id, title: page.title, text: "", version: 0 },
+    requestId: typeof message.requestId === "string" ? message.requestId.slice(0, 80) : "",
+    userId: socket.id
+  });
+}
+
+function handleDuplicatePage(socket, room, message) {
+  if (room.pages.length >= maxPagesPerRoom) {
+    socket.send(JSON.stringify({ type: "action-error", action: "duplicate-page", reason: "page-limit" }));
+    return;
+  }
+  const source = room.pages.find((item) => item.id === message.pageId);
+  if (!source) return;
+
+  const page = createPage(normalizePageTitle(`${source.title} copy`, "Copied page"));
+  page.text = source.text;
+  page.version = source.version;
+  const sourceIndex = room.pages.findIndex((item) => item.id === source.id);
+  room.pages.splice(sourceIndex + 1, 0, page);
+  room.activePageId = page.id;
+  scheduleSave();
+  broadcast(room, {
+    type: "page-added",
+    page: { id: page.id, title: page.title, text: page.text, version: page.version },
+    userId: socket.id
+  });
+}
+
+function handleMovePage(socket, room, message) {
+  const pageIndex = room.pages.findIndex((item) => item.id === message.pageId);
+  if (pageIndex === -1) return;
+  const direction = message.direction === "up" ? -1 : message.direction === "down" ? 1 : 0;
+  if (!direction) return;
+  const nextIndex = pageIndex + direction;
+  if (nextIndex < 0 || nextIndex >= room.pages.length) return;
+
+  const [page] = room.pages.splice(pageIndex, 1);
+  room.pages.splice(nextIndex, 0, page);
+  scheduleSave();
+  broadcast(room, {
+    type: "pages-reordered",
+    pageIds: room.pages.map((item) => item.id),
+    activePageId: room.activePageId
+  });
 }
 
 function handleDeletePage(socket, room, message) {
-  if (room.pages.length <= 1) return;
+  if (room.ownerId !== socket.id) {
+    socket.send(JSON.stringify({ type: "action-error", action: "delete-page", reason: "owner-only" }));
+    return;
+  }
+  if (room.pages.length <= 1) {
+    socket.send(JSON.stringify({ type: "action-error", action: "delete-page", reason: "last-page" }));
+    return;
+  }
 
   const pageIndex = room.pages.findIndex((item) => item.id === message.pageId);
   if (pageIndex === -1) return;
 
   const [deletedPage] = room.pages.splice(pageIndex, 1);
+  room.deletedPages = [...(room.deletedPages || []), { id: deletedPage.id, title: deletedPage.title, text: deletedPage.text, version: deletedPage.version }].slice(-20);
   const fallbackPage = room.pages[Math.min(pageIndex, room.pages.length - 1)];
   if (room.activePageId === deletedPage.id) {
     room.activePageId = fallbackPage.id;
@@ -656,15 +878,59 @@ function handleDeletePage(socket, room, message) {
   }
 
   scheduleSave();
-  broadcast(room, { type: "page-deleted", pageId: deletedPage.id, activePageId: fallbackPage.id });
+  broadcast(room, {
+    type: "page-deleted",
+    pageId: deletedPage.id,
+    activePageId: fallbackPage.id,
+    deletedPageCount: room.deletedPages.length
+  });
+}
+
+function handleRestorePage(socket, room) {
+  if (room.ownerId !== socket.id) {
+    socket.send(JSON.stringify({ type: "action-error", action: "restore-page", reason: "owner-only" }));
+    return;
+  }
+  const deletedPage = room.deletedPages?.pop();
+  if (!deletedPage) {
+    socket.send(JSON.stringify({ type: "action-error", action: "restore-page", reason: "nothing-to-restore" }));
+    return;
+  }
+
+  const page = {
+    id: randomUUID(),
+    title: normalizePageTitle(deletedPage.title, "Restored page"),
+    text: String(deletedPage.text || "").slice(0, maxPageChars),
+    version: Number(deletedPage.version) || 0,
+    history: []
+  };
+  room.pages.push(page);
+  room.activePageId = page.id;
+  scheduleSave();
+  broadcast(room, {
+    type: "page-restored",
+    page: { id: page.id, title: page.title, text: page.text, version: page.version },
+    deletedPageCount: room.deletedPages.length
+  });
 }
 
 function handleRenamePage(socket, room, message) {
   const page = room.pages.find((item) => item.id === message.pageId);
   if (!page) return;
-  page.title = String(message.title || page.title).trim().slice(0, 40) || page.title;
+  page.title = normalizePageTitle(message.title, page.title);
   scheduleSave();
   broadcast(room, { type: "page-renamed", pageId: page.id, title: page.title });
+}
+
+function normalizePageTitle(title, fallback) {
+  const normalized = String(title || "").trim().slice(0, 40);
+  return normalized || fallback || "Untitled";
+}
+
+function colorForIndex(index) {
+  if (index < colorPalette.length) return colorPalette[index];
+  const hue = Math.round((index * 137.508) % 360);
+  return `hsl(${hue} 72% 42%)`;
 }
 
 function handleSwitchPage(socket, room, message) {
@@ -698,6 +964,14 @@ function leave(socket) {
   const room = rooms.get(socket.roomId);
   if (!room) return;
   room.users.delete(socket.id);
+  if (room.ownerId === socket.id) {
+    const nextOwner = room.users.values().next().value;
+    room.ownerId = nextOwner?.id || "";
+    if (nextOwner) {
+      nextOwner.role = "owner";
+      broadcast(room, { type: "user-updated", user: nextOwner });
+    }
+  }
   broadcast(room, { type: "user-left", userId: socket.id });
 
   if (roomTtlMs > 0 && room.users.size === 0) {
@@ -710,6 +984,30 @@ function leave(socket) {
       }
     }, roomTtlMs);
   }
+}
+
+function isSocketRateLimited(socket) {
+  if (!Number.isFinite(maxMessagesPerMinute) || maxMessagesPerMinute <= 0) return false;
+  const now = Date.now();
+  if (now - socket.rateWindowStartedAt > 60_000) {
+    socket.rateWindowStartedAt = now;
+    socket.rateCount = 0;
+  }
+  socket.rateCount += 1;
+  return socket.rateCount > maxMessagesPerMinute;
+}
+
+function isJoinRateLimited(ip) {
+  if (!Number.isFinite(maxJoinAttemptsPerMinute) || maxJoinAttemptsPerMinute <= 0) return false;
+  const now = Date.now();
+  const bucket = joinAttempts.get(ip) || { startedAt: now, count: 0 };
+  if (now - bucket.startedAt > 60_000) {
+    bucket.startedAt = now;
+    bucket.count = 0;
+  }
+  bucket.count += 1;
+  joinAttempts.set(ip, bucket);
+  return bucket.count > maxJoinAttemptsPerMinute;
 }
 
 await loadRooms();

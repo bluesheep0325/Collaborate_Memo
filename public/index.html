@@ -41,6 +41,7 @@
             <span>Pages</span>
             <button id="addPageButton" class="icon-button" title="ページを追加" aria-label="ページを追加">+</button>
           </div>
+          <input id="pageSearchInput" class="page-search" type="search" autocomplete="off" placeholder="ページ検索" aria-label="ページ検索" />
           <nav id="pageList" class="page-list" aria-label="ページ一覧"></nav>
         </aside>
 
@@ -55,9 +56,18 @@
             </div>
             <div class="toolbar-actions">
               <div id="userList" class="user-list" aria-label="参加ユーザー"></div>
+              <button id="shareButton" class="ghost-button" type="button">リンク</button>
+              <button id="movePageUpButton" class="ghost-button" type="button">↑</button>
+              <button id="movePageDownButton" class="ghost-button" type="button">↓</button>
+              <button id="duplicatePageButton" class="ghost-button" type="button">複製</button>
+              <button id="previewButton" class="ghost-button" type="button">Preview</button>
+              <button id="restorePageButton" class="ghost-button" type="button">復元</button>
+              <button id="importButton" class="ghost-button" type="button">読込</button>
+              <button id="exportButton" class="secondary-button" type="button">全保存</button>
               <button id="deletePageButton" class="danger-button" type="button">ページ削除</button>
               <button id="saveButton" class="secondary-button">TXT保存</button>
               <button id="leaveButton" class="ghost-button" type="button">退出</button>
+              <input id="importFileInput" class="hidden" type="file" accept=".json,.txt,text/plain,application/json" />
             </div>
           </header>
 
@@ -70,6 +80,7 @@
               aria-label="共同編集メモ"
               placeholder="ここにメモを書きます"
             ></textarea>
+            <div id="previewPane" class="markdown-preview hidden" aria-label="Markdown preview"></div>
             <div id="cursorLayer" class="cursor-layer" aria-hidden="true"></div>
           </div>
         </section>
