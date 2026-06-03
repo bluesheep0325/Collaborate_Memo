@@ -50,6 +50,9 @@ const state = {
   leaving: false,
   forceNextInputReplace: false,
   composing: false,
+  composingPageId: "",
+  compositionBaseText: "",
+  deferredCompositionOps: [],
   pendingOps: new Map(),
   pendingRecoveries: new Map(),
   recoveryCounter: 0,
@@ -134,7 +137,6 @@ memoInput.addEventListener("input", (event) => {
 
   const nextValue = memoInput.value;
   if (state.composing || event.isComposing) {
-    page.text = nextValue;
     markPageEdited(page.id);
     return;
   }
@@ -182,36 +184,9 @@ memoInput.addEventListener("paste", () => {
   }, 0);
 });
 
-memoInput.addEventListener("compositionstart", () => {
-  state.composing = true;
-});
+memoInput.addEventListener("compositionstart", beginComposition);
 
-memoInput.addEventListener("compositionend", () => {
-  const page = currentPage();
-  state.composing = false;
-  if (!page || memoInput.value === state.lastValue) return;
-
-  const nextValue = memoInput.value;
-  const op = diffText(state.lastValue, nextValue);
-  if (!op) return;
-
-  page.text = nextValue;
-  state.lastValue = nextValue;
-  markPageEdited(page.id);
-  page.version += 1;
-  state.localSequence += 1;
-  rememberPendingOp(page.id, state.localSequence, op);
-
-  send({
-    type: "page-op",
-    pageId: page.id,
-    op,
-    baseVersion: page.version - 1,
-    sequence: state.localSequence,
-    cursor: localCursorPayload()
-  });
-  sendCursor();
-});
+memoInput.addEventListener("compositionend", finishComposition);
 
 memoInput.addEventListener("keyup", sendCursor);
 memoInput.addEventListener("click", sendCursor);
@@ -433,6 +408,13 @@ function receivePageOp(message) {
   const user = state.users.get(message.userId);
   if (user && message.cursor) user.cursor = message.cursor;
 
+  if (isComposingPage(page.id)) {
+    state.lastValue = page.text;
+    state.deferredCompositionOps.push(op);
+    renderCursors();
+    return;
+  }
+
   if (page.id === state.activePageId) {
     const selectionStart = transformPosition(memoInput.selectionStart, op);
     const selectionEnd = transformPosition(memoInput.selectionEnd, op);
@@ -453,12 +435,20 @@ function receivePageReplace(message) {
     return;
   }
 
+  const replaceOp = { start: 0, deleteCount: page.text.length, insert: message.text };
   clearPendingOps(page.id);
   page.text = message.text;
   page.version = Math.max(page.version, message.version);
 
   const user = state.users.get(message.userId);
   if (user && message.cursor) user.cursor = message.cursor;
+
+  if (isComposingPage(page.id)) {
+    state.lastValue = page.text;
+    state.deferredCompositionOps.push(replaceOp);
+    renderCursors();
+    return;
+  }
 
   if (page.id === state.activePageId) {
     const cursorPosition = Math.min(memoInput.selectionStart, page.text.length);
@@ -605,6 +595,69 @@ function renderPages() {
     editingInput?.select();
   }
   updateActionButtons();
+}
+
+function beginComposition() {
+  const page = currentPage();
+  state.composing = true;
+  state.composingPageId = page?.id || "";
+  state.compositionBaseText = page ? page.text : state.lastValue;
+  state.deferredCompositionOps = [];
+}
+
+function finishComposition() {
+  const page = currentPage();
+  const pageId = state.composingPageId;
+  const baseText = state.compositionBaseText;
+  const finalText = memoInput.value;
+  let selectionStart = memoInput.selectionStart;
+  let selectionEnd = memoInput.selectionEnd;
+  const deferredOps = state.deferredCompositionOps;
+
+  state.composing = false;
+  state.composingPageId = "";
+  state.compositionBaseText = "";
+  state.deferredCompositionOps = [];
+
+  if (!page || page.id !== pageId) return;
+
+  let localOp = diffText(baseText, finalText);
+  for (const op of deferredOps) {
+    if (localOp) localOp = transformOp(localOp, op, true);
+    selectionStart = transformPosition(selectionStart, op);
+    selectionEnd = transformPosition(selectionEnd, op);
+  }
+
+  if (localOp) {
+    page.text = applyOp(page.text, localOp);
+    page.version += 1;
+    state.localSequence += 1;
+    rememberPendingOp(page.id, state.localSequence, localOp);
+  }
+
+  state.lastValue = page.text;
+  memoInput.value = page.text;
+  selectionStart = Math.min(selectionStart, memoInput.value.length);
+  selectionEnd = Math.min(selectionEnd, memoInput.value.length);
+  memoInput.setSelectionRange(selectionStart, selectionEnd);
+  markPageEdited(page.id);
+
+  if (localOp) {
+    send({
+      type: "page-op",
+      pageId: page.id,
+      op: localOp,
+      baseVersion: page.version - 1,
+      sequence: state.localSequence,
+      cursor: localCursorPayload()
+    });
+  }
+  sendCursor();
+  renderCursors();
+}
+
+function isComposingPage(pageId) {
+  return state.composing && state.composingPageId === pageId;
 }
 
 function movePageBy(pageId, direction) {
@@ -866,6 +919,7 @@ function stopHeartbeat() {
 function sendCursor() {
   const page = currentPage();
   if (!page) return;
+  if (state.composing && page.id === state.composingPageId) return;
   const payload = localCursorPayload();
   send({ type: "cursor", ...payload });
   const user = state.users.get(state.selfId);
@@ -1063,6 +1117,9 @@ function leaveRoom() {
   state.lastEditedPageId = "";
   state.lastValue = "";
   state.composing = false;
+  state.composingPageId = "";
+  state.compositionBaseText = "";
+  state.deferredCompositionOps = [];
   state.pendingOps = new Map();
   entryError.textContent = "";
   memoView.classList.add("hidden");
