@@ -818,7 +818,7 @@ function handleDuplicatePage(socket, room, message) {
   const source = room.pages.find((item) => item.id === message.pageId);
   if (!source) return;
 
-  const page = createPage(normalizePageTitle(`${source.title} copy`, "Copied page"));
+  const page = createPage(normalizePageTitle(`${source.title} コピー`, "Copied page"));
   page.text = source.text;
   page.version = source.version;
   const sourceIndex = room.pages.findIndex((item) => item.id === source.id);
@@ -835,6 +835,19 @@ function handleDuplicatePage(socket, room, message) {
 function handleMovePage(socket, room, message) {
   const pageIndex = room.pages.findIndex((item) => item.id === message.pageId);
   if (pageIndex === -1) return;
+  if (typeof message.beforePageId === "string") {
+    const [page] = room.pages.splice(pageIndex, 1);
+    const beforeIndex = room.pages.findIndex((item) => item.id === message.beforePageId);
+    room.pages.splice(beforeIndex === -1 ? room.pages.length : beforeIndex, 0, page);
+    scheduleSave();
+    broadcast(room, {
+      type: "pages-reordered",
+      pageIds: room.pages.map((item) => item.id),
+      activePageId: room.activePageId
+    });
+    return;
+  }
+
   const direction = message.direction === "up" ? -1 : message.direction === "down" ? 1 : 0;
   if (!direction) return;
   const nextIndex = pageIndex + direction;
@@ -851,10 +864,6 @@ function handleMovePage(socket, room, message) {
 }
 
 function handleDeletePage(socket, room, message) {
-  if (room.ownerId !== socket.id) {
-    socket.send(JSON.stringify({ type: "action-error", action: "delete-page", reason: "owner-only" }));
-    return;
-  }
   if (room.pages.length <= 1) {
     socket.send(JSON.stringify({ type: "action-error", action: "delete-page", reason: "last-page" }));
     return;
@@ -887,10 +896,6 @@ function handleDeletePage(socket, room, message) {
 }
 
 function handleRestorePage(socket, room) {
-  if (room.ownerId !== socket.id) {
-    socket.send(JSON.stringify({ type: "action-error", action: "restore-page", reason: "owner-only" }));
-    return;
-  }
   const deletedPage = room.deletedPages?.pop();
   if (!deletedPage) {
     socket.send(JSON.stringify({ type: "action-error", action: "restore-page", reason: "nothing-to-restore" }));
