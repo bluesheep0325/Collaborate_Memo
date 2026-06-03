@@ -206,15 +206,10 @@ textarea:focus {
   white-space: nowrap;
 }
 
-.room-actions,
-.page-tools {
+.room-actions {
   display: flex;
   align-items: center;
   gap: 7px;
-}
-
-.page-tools {
-  flex-wrap: wrap;
 }
 
 .side-tool-button {
@@ -306,9 +301,17 @@ textarea:focus {
   font-size: 0.9rem;
 }
 
-.page-item {
+.page-row {
   display: flex;
   align-items: center;
+  gap: 6px;
+}
+
+.page-item {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
   min-height: 40px;
   padding: 0 10px;
   border: 1px solid transparent;
@@ -319,7 +322,7 @@ textarea:focus {
   text-align: left;
 }
 
-.page-item:active {
+.page-row:active {
   cursor: grabbing;
 }
 
@@ -330,13 +333,35 @@ textarea:focus {
   font-weight: 800;
 }
 
-.page-item.dragging {
+.page-row.dragging {
   opacity: 0.55;
 }
 
-.page-item.drop-target {
+.page-row.drop-target .page-item {
   border-color: var(--accent);
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.page-edit-button {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.page-edit-button:hover:not(:disabled) {
+  border-color: #9ccbd6;
+  background: var(--accent-soft);
+}
+
+.page-edit-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .workspace {
@@ -439,6 +464,10 @@ textarea:focus {
   justify-content: flex-end;
   gap: 10px;
   min-width: 0;
+}
+
+#previewButton {
+  width: 84px;
 }
 
 .user-list {

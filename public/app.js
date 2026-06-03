@@ -10,7 +10,6 @@ const pageList = document.querySelector("#pageList");
 const addPageButton = document.querySelector("#addPageButton");
 const pageSearchInput = document.querySelector("#pageSearchInput");
 const pageTitleInput = document.querySelector("#pageTitleInput");
-const editTitleButton = document.querySelector("#editTitleButton");
 const statusText = document.querySelector("#statusText");
 const userList = document.querySelector("#userList");
 const shareButton = document.querySelector("#shareButton");
@@ -103,7 +102,7 @@ pageList.addEventListener("dragover", (event) => {
 });
 
 pageList.addEventListener("drop", (event) => {
-  const dropItem = event.target instanceof Element ? event.target.closest(".page-item") : null;
+  const dropItem = event.target instanceof Element ? event.target.closest(".page-row") : null;
   if (!state.draggingPageId || dropItem) return;
   event.preventDefault();
   send({ type: "move-page", pageId: state.draggingPageId, beforePageId: "" });
@@ -149,19 +148,6 @@ importFileInput.addEventListener("change", async () => {
   importFileInput.value = "";
   if (!file) return;
   await importPagesFromFile(file);
-});
-
-editTitleButton.addEventListener("click", () => {
-  if (!canEdit()) return;
-  if (pageTitleInput.readOnly) {
-    beginTitleEdit();
-  } else {
-    commitTitleEdit();
-  }
-});
-
-editTitleButton.addEventListener("mousedown", (event) => {
-  event.preventDefault();
 });
 
 pageTitleInput.addEventListener("input", () => {
@@ -569,41 +555,60 @@ function renderPages() {
     : state.pages;
   pageList.replaceChildren(
     ...visiblePages.map((page) => {
+      const row = document.createElement("div");
+      row.className = `page-row${page.id === state.activePageId ? " active" : ""}`;
+      row.draggable = canEdit();
+      row.dataset.pageId = page.id;
+
       const button = document.createElement("button");
       button.className = `page-item${page.id === state.activePageId ? " active" : ""}`;
       button.type = "button";
-      button.draggable = canEdit();
       button.dataset.pageId = page.id;
       button.textContent = page.title || "Untitled";
       button.addEventListener("click", () => switchPage(page.id, true));
-      button.addEventListener("dragstart", (event) => {
+
+      const editButton = document.createElement("button");
+      editButton.className = "page-edit-button";
+      editButton.type = "button";
+      editButton.textContent = "編集";
+      editButton.title = "ページ名を編集";
+      editButton.disabled = !canEdit();
+      editButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (!canEdit()) return;
+        switchPage(page.id, true);
+        beginTitleEdit();
+      });
+
+      row.addEventListener("dragstart", (event) => {
         if (!canEdit()) return;
         state.draggingPageId = page.id;
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", page.id);
-        button.classList.add("dragging");
+        row.classList.add("dragging");
       });
-      button.addEventListener("dragend", () => {
+      row.addEventListener("dragend", () => {
         state.draggingPageId = "";
-        pageList.querySelectorAll(".page-item").forEach((item) => item.classList.remove("dragging", "drop-target"));
+        pageList.querySelectorAll(".page-row").forEach((item) => item.classList.remove("dragging", "drop-target"));
       });
-      button.addEventListener("dragover", (event) => {
+      row.addEventListener("dragover", (event) => {
         if (!state.draggingPageId || state.draggingPageId === page.id) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
-        button.classList.add("drop-target");
+        row.classList.add("drop-target");
       });
-      button.addEventListener("dragleave", () => {
-        button.classList.remove("drop-target");
+      row.addEventListener("dragleave", () => {
+        row.classList.remove("drop-target");
       });
-      button.addEventListener("drop", (event) => {
+      row.addEventListener("drop", (event) => {
         event.preventDefault();
         const pageId = event.dataTransfer.getData("text/plain") || state.draggingPageId;
-        button.classList.remove("drop-target");
+        row.classList.remove("drop-target");
         if (!pageId || pageId === page.id) return;
         send({ type: "move-page", pageId, beforePageId: page.id });
       });
-      return button;
+      row.append(button, editButton);
+      return row;
     })
   );
   deletePageButton.disabled = !canEdit() || state.pages.length <= 1;
@@ -612,7 +617,6 @@ function renderPages() {
       ? "最後のページは削除できません"
       : "現在のページを削除";
   addPageButton.disabled = !canEdit();
-  editTitleButton.disabled = !canEdit();
   updateActionButtons();
 }
 
@@ -751,7 +755,6 @@ function beginTitleEdit() {
 
   state.titleBeforeEdit = page.title;
   pageTitleInput.readOnly = false;
-  editTitleButton.textContent = "完了";
   pageTitleInput.focus();
   pageTitleInput.select();
 }
@@ -781,7 +784,6 @@ function cancelTitleEdit() {
 
 function endTitleEditMode() {
   pageTitleInput.readOnly = true;
-  editTitleButton.textContent = "編集";
   state.titleBeforeEdit = "";
 }
 
@@ -810,7 +812,6 @@ function canEdit() {
 function setEditingEnabled(enabled) {
   memoInput.readOnly = !enabled;
   addPageButton.disabled = !enabled;
-  editTitleButton.disabled = !enabled;
   importButton.disabled = !enabled;
   duplicatePageButton.disabled = !enabled;
   if (!enabled) {

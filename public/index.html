@@ -47,16 +47,6 @@
             <span>Pages</span>
             <button id="addPageButton" class="icon-button" title="ページを追加" aria-label="ページを追加">+</button>
           </div>
-          <div class="page-tools" aria-label="ページ操作">
-            <button id="duplicatePageButton" class="side-tool-button" type="button" title="ページを複製" aria-label="ページを複製">複製</button>
-            <button id="deletePageButton" class="side-tool-button danger-button-inline" type="button" title="ページを削除" aria-label="ページを削除">削除</button>
-            <button id="restorePageButton" class="side-tool-button" type="button" title="削除ページを復元" aria-label="削除ページを復元">復元</button>
-            <button id="previewButton" class="side-tool-button" type="button" title="プレビュー" aria-label="プレビュー">表示</button>
-            <button id="importButton" class="side-tool-button" type="button" title="読み込み" aria-label="読み込み">読込</button>
-            <button id="exportButton" class="side-tool-button" type="button" title="全ページを保存" aria-label="全ページを保存">全保存</button>
-            <button id="saveButton" class="side-tool-button" type="button" title="現在ページをTXT保存" aria-label="現在ページをTXT保存">TXT</button>
-            <input id="importFileInput" class="hidden" type="file" accept=".json,.txt,text/plain,application/json" />
-          </div>
           <input id="pageSearchInput" class="page-search" type="search" autocomplete="off" placeholder="ページ検索" aria-label="ページ検索" />
           <nav id="pageList" class="page-list" aria-label="ページ一覧"></nav>
         </aside>
@@ -66,12 +56,19 @@
             <div class="title-wrap">
               <div class="title-row">
                 <input id="pageTitleInput" class="page-title" aria-label="ページ名" maxlength="40" readonly />
-                <button id="editTitleButton" class="title-edit-button" type="button">編集</button>
               </div>
               <span id="statusText" class="status is-connecting">接続状態: 接続中</span>
             </div>
             <div class="toolbar-actions">
               <div id="userList" class="user-list" aria-label="参加ユーザー"></div>
+              <button id="previewButton" class="ghost-button" type="button">表示</button>
+              <button id="duplicatePageButton" class="ghost-button" type="button">複製</button>
+              <button id="restorePageButton" class="ghost-button" type="button">復元</button>
+              <button id="importButton" class="ghost-button" type="button" title="JSONまたはTXTを読み込み">読込</button>
+              <button id="exportButton" class="secondary-button" type="button">全保存</button>
+              <button id="saveButton" class="secondary-button" type="button">TXT保存</button>
+              <button id="deletePageButton" class="danger-button" type="button">ページ削除</button>
+              <input id="importFileInput" class="hidden" type="file" accept=".json,.txt,text/plain,application/json" />
             </div>
           </header>
 
