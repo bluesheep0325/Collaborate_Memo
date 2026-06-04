@@ -73,7 +73,6 @@ function getRoom(roomId) {
       pages: [firstPage],
       activePageId: firstPage.id,
       users: new Map(),
-      ownerId: "",
       deletedPages: []
     });
     scheduleSave();
@@ -180,7 +179,6 @@ async function loadRooms() {
         pages,
         activePageId: roomData.activePageId || pages[0].id,
         users: new Map(),
-        ownerId: "",
         deletedPages: Array.isArray(roomData.deletedPages) ? roomData.deletedPages.slice(-20) : []
       });
     }
@@ -242,7 +240,6 @@ async function loadRoomsFromSupabase() {
       pages,
       activePageId: row.active_page_id || pages[0].id,
       users: new Map(),
-      ownerId: "",
       deletedPages: []
     });
   }
@@ -671,15 +668,11 @@ function joinRoom(socket, message) {
     return;
   }
 
-  if (!room.ownerId || room.users.size === 0) {
-    room.ownerId = socket.id;
-  }
   const colorIndex = room.users.size;
   const user = {
     id: socket.id,
     name: String(message.userName || "Guest").trim().slice(0, 24) || "Guest",
     color: colorForIndex(colorIndex),
-    role: socket.id === room.ownerId ? "owner" : "editor",
     cursor: { pageId: room.activePageId, index: 0, start: 0, end: 0 },
     activePageId: room.activePageId
   };
@@ -969,14 +962,6 @@ function leave(socket) {
   const room = rooms.get(socket.roomId);
   if (!room) return;
   room.users.delete(socket.id);
-  if (room.ownerId === socket.id) {
-    const nextOwner = room.users.values().next().value;
-    room.ownerId = nextOwner?.id || "";
-    if (nextOwner) {
-      nextOwner.role = "owner";
-      broadcast(room, { type: "user-updated", user: nextOwner });
-    }
-  }
   broadcast(room, { type: "user-left", userId: socket.id });
 
   if (roomTtlMs > 0 && room.users.size === 0) {

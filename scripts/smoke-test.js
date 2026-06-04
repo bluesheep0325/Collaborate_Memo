@@ -124,13 +124,13 @@ try {
   const aliceDelete = waitForMessage(alice.socket, (message) => message.type === "page-deleted", "alice page-deleted");
   bob.socket.send(JSON.stringify({ type: "delete-page", pageId: pageMessage.page.id }));
   const deleteMessage = await aliceDelete;
-  assert(deleteMessage.pageId === pageMessage.page.id, "non-owner deleted page should reach the other user");
+  assert(deleteMessage.pageId === pageMessage.page.id, "deleted page should reach the other user");
   assert(deleteMessage.deletedPageCount === 1, "deleted page count should be broadcast");
 
   const bobRestore = waitForMessage(bob.socket, (message) => message.type === "page-restored", "bob page-restored");
   bob.socket.send(JSON.stringify({ type: "restore-page" }));
   const restoreMessage = await bobRestore;
-  assert(restoreMessage.page.title === "Second page", "non-owner restored page should keep its title");
+  assert(restoreMessage.page.title === "Second page", "restored page should keep its title");
   assert(restoreMessage.deletedPageCount === 0, "restored page should update deleted count");
 
   alice.socket.close();
