@@ -36,6 +36,11 @@ const sessionKey = "collaborate-memo-session";
 const maxOcrImageBytes = 10 * 1024 * 1024;
 const maxOcrImageSide = 2200;
 const minOcrImageSide = 1800;
+const ocrPageSegModes = [
+  { value: "6", label: "本文" },
+  { value: "11", label: "散在テキスト" },
+  { value: "4", label: "段組み" }
+];
 
 const state = {
   socket: null,
@@ -757,11 +762,10 @@ async function recognizeImageText(file) {
   openOcrDialog("画像からテキストを読み取っています", "");
 
   try {
-    const image = await imageForOcr(file);
+    const images = await imagesForOcr(file);
     const worker = await ocrWorker();
-    setOcrStatus("OCRを実行しています");
-    const result = await worker.recognize(image);
-    const text = normalizeOcrText(result.data?.text || "");
+    const result = await recognizeBestOcrText(worker, images);
+    const text = result.text;
     ocrResultInput.value = text;
     ocrResultInput.disabled = false;
     insertOcrButton.disabled = text.length === 0;
@@ -853,8 +857,43 @@ function ocrStatusLabel(status) {
   return labels[status] || status;
 }
 
-async function imageForOcr(file) {
-  if (!("createImageBitmap" in window)) return file;
+async function recognizeBestOcrText(worker, images) {
+  const attempts = [
+    { kind: "enhanced", pageSegMode: ocrPageSegModes[0] },
+    { kind: "enhanced", pageSegMode: ocrPageSegModes[1] },
+    { kind: "binary", pageSegMode: ocrPageSegModes[0] },
+    { kind: "original", pageSegMode: ocrPageSegModes[1] }
+  ];
+  let best = { text: "", score: -Infinity, confidence: 0 };
+  let attemptCount = 0;
+  const runnableAttempts = attempts
+    .map((attempt) => ({ ...attempt, candidate: images.find((image) => image.kind === attempt.kind) }))
+    .filter((attempt) => attempt.candidate);
+
+  for (const attempt of runnableAttempts) {
+    attemptCount += 1;
+    setOcrStatus(`OCRを実行しています ${attemptCount}/${runnableAttempts.length} (${attempt.candidate.label}/${attempt.pageSegMode.label})`);
+    await worker.setParameters({
+      preserve_interword_spaces: "1",
+      tessedit_pageseg_mode: attempt.pageSegMode.value
+    });
+    const result = await worker.recognize(attempt.candidate.image);
+    const text = normalizeOcrText(result.data?.text || "");
+    const score = scoreOcrText(text, result.data?.confidence);
+    if (score > best.score) {
+      best = {
+        text,
+        score,
+        confidence: Number(result.data?.confidence) || 0
+      };
+    }
+  }
+
+  return best;
+}
+
+async function imagesForOcr(file) {
+  if (!("createImageBitmap" in window)) return [{ kind: "original", label: "元画像", image: file }];
 
   try {
     const bitmap = await createImageBitmap(file);
@@ -863,28 +902,173 @@ async function imageForOcr(file) {
       maxOcrImageSide / longestSide,
       longestSide < minOcrImageSide ? minOcrImageSide / longestSide : 1
     );
-    if (scale === 1 && file.size < 2 * 1024 * 1024) {
-      bitmap.close?.();
-      return file;
-    }
-
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-    const context = canvas.getContext("2d");
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
-    context.fillStyle = "#fff";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    sourceCanvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
+    sourceContext.imageSmoothingEnabled = true;
+    sourceContext.imageSmoothingQuality = "high";
+    sourceContext.fillStyle = "#fff";
+    sourceContext.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+    sourceContext.drawImage(bitmap, 0, 0, sourceCanvas.width, sourceCanvas.height);
     bitmap.close?.();
+    cleanDecorativeEdgeBands(sourceCanvas);
 
-    return await new Promise((resolve, reject) => {
-      canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("画像の前処理に失敗しました。"))), "image/png");
-    });
+    const enhancedCanvas = preprocessedOcrCanvas(sourceCanvas, "enhanced");
+    const binaryCanvas = preprocessedOcrCanvas(sourceCanvas, "binary");
+
+    return [
+      { kind: "enhanced", label: "補正", image: await canvasToOcrBlob(enhancedCanvas) },
+      { kind: "binary", label: "二値化", image: await canvasToOcrBlob(binaryCanvas) },
+      { kind: "original", label: "元画像", image: await canvasToOcrBlob(sourceCanvas) }
+    ];
   } catch {
-    return file;
+    return [{ kind: "original", label: "元画像", image: file }];
   }
+}
+
+function preprocessedOcrCanvas(sourceCanvas, mode) {
+  const canvas = document.createElement("canvas");
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(sourceCanvas, 0, 0);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  const histogram = new Array(256).fill(0);
+
+  for (let index = 0; index < data.length; index += 4) {
+    const gray = compositedGray(data, index);
+    histogram[gray] += 1;
+  }
+
+  const threshold = Math.min(220, Math.max(140, otsuThreshold(histogram) + 10));
+  for (let index = 0; index < data.length; index += 4) {
+    const gray = compositedGray(data, index);
+    let value = gray;
+    if (mode === "binary") {
+      value = gray < threshold ? 0 : 255;
+    } else {
+      value = Math.round((gray - 32) * 1.45);
+      value = Math.min(255, Math.max(0, value));
+      if (value > 235) value = 255;
+      if (value < 70) value = 0;
+    }
+    data[index] = value;
+    data[index + 1] = value;
+    data[index + 2] = value;
+    data[index + 3] = 255;
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function cleanDecorativeEdgeBands(canvas) {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  if (!looksLikeLightDocument(data, canvas.width, canvas.height)) return;
+
+  const edgeLimit = Math.max(1, Math.round(canvas.height * 0.12));
+  for (let y = 0; y < edgeLimit; y += 1) {
+    if (darkPixelRatio(data, canvas.width, y) > 0.55) paintRowWhite(data, canvas.width, y);
+  }
+  for (let y = canvas.height - edgeLimit; y < canvas.height; y += 1) {
+    if (darkPixelRatio(data, canvas.width, y) > 0.55) paintRowWhite(data, canvas.width, y);
+  }
+  context.putImageData(imageData, 0, 0);
+}
+
+function looksLikeLightDocument(data, width, height) {
+  const sampleSize = Math.min(width, height, Math.max(4, Math.round(Math.min(width, height) * 0.03)));
+  const corners = [
+    [0, 0],
+    [width - sampleSize, 0],
+    [0, height - sampleSize],
+    [width - sampleSize, height - sampleSize]
+  ];
+  return corners.filter(([x, y]) => averageGray(data, width, x, y, sampleSize, sampleSize) > 190).length >= 3;
+}
+
+function averageGray(data, width, startX, startY, sampleWidth, sampleHeight) {
+  let total = 0;
+  let count = 0;
+  for (let y = startY; y < startY + sampleHeight; y += 1) {
+    for (let x = startX; x < startX + sampleWidth; x += 1) {
+      total += compositedGray(data, (y * width + x) * 4);
+      count += 1;
+    }
+  }
+  return count ? total / count : 0;
+}
+
+function darkPixelRatio(data, width, y) {
+  let dark = 0;
+  for (let x = 0; x < width; x += 1) {
+    if (compositedGray(data, (y * width + x) * 4) < 80) dark += 1;
+  }
+  return dark / width;
+}
+
+function paintRowWhite(data, width, y) {
+  for (let x = 0; x < width; x += 1) {
+    const index = (y * width + x) * 4;
+    data[index] = 255;
+    data[index + 1] = 255;
+    data[index + 2] = 255;
+    data[index + 3] = 255;
+  }
+}
+
+function compositedGray(data, index) {
+  const alpha = data[index + 3] / 255;
+  const red = data[index] * alpha + 255 * (1 - alpha);
+  const green = data[index + 1] * alpha + 255 * (1 - alpha);
+  const blue = data[index + 2] * alpha + 255 * (1 - alpha);
+  return Math.round(red * 0.299 + green * 0.587 + blue * 0.114);
+}
+
+function otsuThreshold(histogram) {
+  const total = histogram.reduce((sum, count) => sum + count, 0);
+  let sum = 0;
+  for (let value = 0; value < histogram.length; value += 1) sum += value * histogram[value];
+
+  let backgroundWeight = 0;
+  let backgroundSum = 0;
+  let maxVariance = -1;
+  let threshold = 180;
+
+  for (let value = 0; value < histogram.length; value += 1) {
+    backgroundWeight += histogram[value];
+    if (backgroundWeight === 0) continue;
+    const foregroundWeight = total - backgroundWeight;
+    if (foregroundWeight === 0) break;
+    backgroundSum += value * histogram[value];
+    const backgroundMean = backgroundSum / backgroundWeight;
+    const foregroundMean = (sum - backgroundSum) / foregroundWeight;
+    const variance = backgroundWeight * foregroundWeight * (backgroundMean - foregroundMean) ** 2;
+    if (variance > maxVariance) {
+      maxVariance = variance;
+      threshold = value;
+    }
+  }
+
+  return threshold;
+}
+
+function canvasToOcrBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("画像の前処理に失敗しました。"))), "image/png");
+  });
+}
+
+function scoreOcrText(text, confidence) {
+  const compactText = text.replace(/\s/g, "");
+  const usefulCharacters = compactText.match(/[0-9A-Za-zぁ-んァ-ヶ一-龯々〆ヵヶー①-⑳]/gu)?.length || 0;
+  const lineCount = text.split("\n").filter((line) => line.trim()).length;
+  const brokenCharacters = text.match(/[�□■]/g)?.length || 0;
+  return (Number(confidence) || 0) * 2 + Math.min(usefulCharacters, 700) * 0.45 + Math.min(lineCount, 30) * 3 - brokenCharacters * 20;
 }
 
 function normalizeOcrText(text) {
