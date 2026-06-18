@@ -686,7 +686,6 @@ function renderUsers() {
       name.className = "user-name";
       const suffixes = [];
       if (user.id === state.selfId) suffixes.push("自分");
-      if (user.role === "owner") suffixes.push("所有者");
       name.textContent = suffixes.length ? `${user.name} (${suffixes.join(", ")})` : user.name;
 
       pill.append(dot, name);
