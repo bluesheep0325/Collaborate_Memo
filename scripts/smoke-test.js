@@ -36,8 +36,32 @@ try {
   assert(health.limits.maxPageChars >= 200000, "health endpoint should expose page character limit");
   assert(health.limits.maxFrameBytes > 128 * 1024, "websocket frame limit should allow large paste payloads");
 
-  const html = await fetch(baseUrl).then((response) => response.text());
+  const htmlResponse = await fetch(baseUrl);
+  const html = await htmlResponse.text();
   assert(html.includes("Collaborate Memo"), "index page should load");
+  assert(html.includes("ocrButton"), "OCR control should be present");
+  const csp = htmlResponse.headers.get("content-security-policy") || "";
+  assert(csp.includes("worker-src 'self'"), "OCR worker should be allowed by CSP");
+  assert(csp.includes("'wasm-unsafe-eval'"), "OCR wasm should be allowed by CSP");
+
+  const ocrWorker = await fetch(`${baseUrl}/vendor/tesseract/worker.min.js`);
+  assert(ocrWorker.ok, "OCR worker asset should be served");
+  const ocrCoreAssets = [
+    "/vendor/tesseract-core/tesseract-core.wasm",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd.wasm",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd.wasm.js",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd-lstm.wasm",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd-lstm.wasm.js"
+  ];
+  for (const assetPath of ocrCoreAssets) {
+    const response = await fetch(`${baseUrl}${assetPath}`);
+    assert(response.ok, `OCR core asset should be served: ${assetPath}`);
+    if (assetPath.endsWith(".wasm")) {
+      assert((response.headers.get("content-type") || "").includes("application/wasm"), `OCR wasm should use wasm content type: ${assetPath}`);
+    }
+  }
+  const ocrLanguage = await fetch(`${baseUrl}/vendor/tessdata/jpn.traineddata.gz`);
+  assert(ocrLanguage.ok, "OCR Japanese language data should be served");
 
   const rejected = await connectClient("smoke-room", "Mallory", "wrong");
   assert(rejected.error.reason === "invalid-password", "wrong password should be rejected");

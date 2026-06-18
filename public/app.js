@@ -15,15 +15,32 @@ const userList = document.querySelector("#userList");
 const shareButton = document.querySelector("#shareButton");
 const duplicatePageButton = document.querySelector("#duplicatePageButton");
 const restorePageButton = document.querySelector("#restorePageButton");
+const ocrButton = document.querySelector("#ocrButton");
 const importButton = document.querySelector("#importButton");
 const exportButton = document.querySelector("#exportButton");
 const deletePageButton = document.querySelector("#deletePageButton");
 const saveButton = document.querySelector("#saveButton");
 const leaveButton = document.querySelector("#leaveButton");
 const importFileInput = document.querySelector("#importFileInput");
+const ocrFileInput = document.querySelector("#ocrFileInput");
 const memoInput = document.querySelector("#memoInput");
+const editorFrame = document.querySelector(".editor-frame");
 const cursorLayer = document.querySelector("#cursorLayer");
+const ocrDialog = document.querySelector("#ocrDialog");
+const ocrStatusText = document.querySelector("#ocrStatusText");
+const ocrResultInput = document.querySelector("#ocrResultInput");
+const insertOcrButton = document.querySelector("#insertOcrButton");
+const cancelOcrButton = document.querySelector("#cancelOcrButton");
+const closeOcrButton = document.querySelector("#closeOcrButton");
 const sessionKey = "collaborate-memo-session";
+const maxOcrImageBytes = 10 * 1024 * 1024;
+const maxOcrImageSide = 2200;
+const minOcrImageSide = 1800;
+const ocrPageSegModes = [
+  { value: "6", label: "本文" },
+  { value: "11", label: "散在テキスト" },
+  { value: "4", label: "段組み" }
+];
 
 const state = {
   socket: null,
@@ -55,6 +72,10 @@ const state = {
   deferredCompositionOps: [],
   pendingOps: new Map(),
   pendingRecoveries: new Map(),
+  ocrWorker: null,
+  ocrWorkerPromise: null,
+  ocrBusy: false,
+  ocrInsertRange: null,
   recoveryCounter: 0,
   maxPageChars: 0
 };
@@ -117,6 +138,25 @@ duplicatePageButton.addEventListener("click", () => {
   send({ type: "duplicate-page", pageId: page.id });
 });
 
+ocrButton.addEventListener("click", () => {
+  if (!canEdit()) return;
+  ocrFileInput.click();
+});
+
+ocrFileInput.addEventListener("change", async () => {
+  const file = ocrFileInput.files?.[0];
+  ocrFileInput.value = "";
+  if (!file) return;
+  await recognizeImageText(file);
+});
+
+insertOcrButton.addEventListener("click", insertOcrResult);
+cancelOcrButton.addEventListener("click", closeOcrDialog);
+closeOcrButton.addEventListener("click", closeOcrDialog);
+ocrDialog.addEventListener("click", (event) => {
+  if (event.target === ocrDialog && !state.ocrBusy) closeOcrDialog();
+});
+
 exportButton.addEventListener("click", exportAllPages);
 
 importButton.addEventListener("click", () => {
@@ -173,7 +213,15 @@ memoInput.addEventListener("input", (event) => {
   sendCursor();
 });
 
-memoInput.addEventListener("paste", () => {
+memoInput.addEventListener("paste", (event) => {
+  const image = imageFileFromDataTransfer(event.clipboardData);
+  if (image) {
+    event.preventDefault();
+    state.forceNextInputReplace = false;
+    recognizeImageText(image);
+    return;
+  }
+
   state.forceNextInputReplace = true;
   setTimeout(() => {
     const page = currentPage();
@@ -182,6 +230,19 @@ memoInput.addEventListener("paste", () => {
       replacePageText(page, memoInput.value);
     }
   }, 0);
+});
+
+editorFrame.addEventListener("dragover", (event) => {
+  if (imageFileFromDataTransfer(event.dataTransfer)) {
+    event.preventDefault();
+  }
+});
+
+editorFrame.addEventListener("drop", (event) => {
+  const image = imageFileFromDataTransfer(event.dataTransfer);
+  if (!image) return;
+  event.preventDefault();
+  recognizeImageText(image);
 });
 
 memoInput.addEventListener("compositionstart", beginComposition);
@@ -660,6 +721,387 @@ function isComposingPage(pageId) {
   return state.composing && state.composingPageId === pageId;
 }
 
+function imageFileFromDataTransfer(dataTransfer) {
+  if (!dataTransfer) return null;
+
+  for (const item of dataTransfer.items || []) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      return item.getAsFile();
+    }
+  }
+
+  for (const file of dataTransfer.files || []) {
+    if (file.type.startsWith("image/")) return file;
+  }
+
+  return null;
+}
+
+async function recognizeImageText(file) {
+  if (!canEdit()) return;
+  if (state.composing) {
+    showNotice("変換中はOCR結果を挿入できません。変換を確定してから実行してください。", "error");
+    return;
+  }
+  if (!file.type.startsWith("image/")) {
+    showNotice("画像ファイルを選択してください。", "error");
+    return;
+  }
+  if (file.size > maxOcrImageBytes) {
+    showNotice("OCRできる画像は10MBまでです。", "error");
+    return;
+  }
+  if (state.ocrBusy) return;
+
+  state.ocrBusy = true;
+  state.ocrInsertRange = {
+    pageId: state.activePageId,
+    start: memoInput.selectionStart,
+    end: memoInput.selectionEnd
+  };
+  openOcrDialog("画像からテキストを読み取っています", "");
+
+  try {
+    const images = await imagesForOcr(file);
+    const worker = await ocrWorker();
+    const result = await recognizeBestOcrText(worker, images);
+    const text = result.text;
+    ocrResultInput.value = text;
+    ocrResultInput.disabled = false;
+    insertOcrButton.disabled = text.length === 0;
+    setOcrStatus(text ? "認識結果を確認して挿入できます" : "テキストを検出できませんでした");
+    showNotice(text ? "OCRが完了しました。" : "OCRでテキストを検出できませんでした。", text ? "online" : "error");
+  } catch (error) {
+    const message = errorMessage(error);
+    ocrResultInput.value = "";
+    ocrResultInput.disabled = true;
+    insertOcrButton.disabled = true;
+    setOcrStatus(`OCRに失敗しました: ${message}`);
+    showNotice("OCRに失敗しました。", "error");
+  } finally {
+    state.ocrBusy = false;
+    updateActionButtons();
+  }
+}
+
+function errorMessage(error) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string") return error;
+  if (error?.message) return String(error.message);
+  if (error?.type) return String(error.type);
+  return "原因不明のエラー";
+}
+
+function openOcrDialog(status, text) {
+  ocrDialog.classList.remove("hidden");
+  ocrResultInput.value = text;
+  ocrResultInput.disabled = true;
+  insertOcrButton.disabled = true;
+  cancelOcrButton.disabled = false;
+  closeOcrButton.disabled = false;
+  setOcrStatus(status);
+}
+
+function closeOcrDialog() {
+  if (state.ocrBusy) return;
+  ocrDialog.classList.add("hidden");
+  state.ocrInsertRange = null;
+  ocrResultInput.value = "";
+}
+
+function setOcrStatus(text) {
+  ocrStatusText.textContent = text;
+}
+
+async function ocrWorker() {
+  if (state.ocrWorker) return state.ocrWorker;
+  if (!state.ocrWorkerPromise) {
+    state.ocrWorkerPromise = import("/vendor/tesseract/tesseract.esm.min.js").then(async (module) => {
+      const tesseract = module.createWorker ? module : module.default;
+      if (typeof tesseract?.createWorker !== "function") {
+        throw new Error("OCRライブラリを初期化できませんでした。");
+      }
+      const worker = await tesseract.createWorker(["jpn", "eng"], 1, {
+        workerPath: "/vendor/tesseract/worker.min.js",
+        corePath: "/vendor/tesseract-core",
+        langPath: "/vendor/tessdata",
+        cacheMethod: "none",
+        workerBlobURL: false,
+        logger: (message) => {
+          if (!state.ocrBusy || !message.status) return;
+          const progress = Number.isFinite(message.progress) ? ` ${Math.round(message.progress * 100)}%` : "";
+          setOcrStatus(`${ocrStatusLabel(message.status)}${progress}`);
+        }
+      });
+      await worker.setParameters({ preserve_interword_spaces: "1" });
+      state.ocrWorker = worker;
+      return worker;
+    }).catch((error) => {
+      state.ocrWorker = null;
+      state.ocrWorkerPromise = null;
+      throw error;
+    });
+  }
+  return state.ocrWorkerPromise;
+}
+
+function ocrStatusLabel(status) {
+  const labels = {
+    loading: "OCRエンジンを読み込んでいます",
+    "loading tesseract core": "OCRエンジンを読み込んでいます",
+    "initializing tesseract": "OCRエンジンを初期化しています",
+    "loading language traineddata": "日本語/英語データを読み込んでいます",
+    "initializing api": "OCRを準備しています",
+    recognizing: "画像から文字を読み取っています"
+  };
+  return labels[status] || status;
+}
+
+async function recognizeBestOcrText(worker, images) {
+  const attempts = [
+    { kind: "enhanced", pageSegMode: ocrPageSegModes[0] },
+    { kind: "enhanced", pageSegMode: ocrPageSegModes[1] },
+    { kind: "binary", pageSegMode: ocrPageSegModes[0] },
+    { kind: "original", pageSegMode: ocrPageSegModes[1] }
+  ];
+  let best = { text: "", score: -Infinity, confidence: 0 };
+  let attemptCount = 0;
+  const runnableAttempts = attempts
+    .map((attempt) => ({ ...attempt, candidate: images.find((image) => image.kind === attempt.kind) }))
+    .filter((attempt) => attempt.candidate);
+
+  for (const attempt of runnableAttempts) {
+    attemptCount += 1;
+    setOcrStatus(`OCRを実行しています ${attemptCount}/${runnableAttempts.length} (${attempt.candidate.label}/${attempt.pageSegMode.label})`);
+    await worker.setParameters({
+      preserve_interword_spaces: "1",
+      tessedit_pageseg_mode: attempt.pageSegMode.value
+    });
+    const result = await worker.recognize(attempt.candidate.image);
+    const text = normalizeOcrText(result.data?.text || "");
+    const score = scoreOcrText(text, result.data?.confidence);
+    if (score > best.score) {
+      best = {
+        text,
+        score,
+        confidence: Number(result.data?.confidence) || 0
+      };
+    }
+  }
+
+  return best;
+}
+
+async function imagesForOcr(file) {
+  if (!("createImageBitmap" in window)) return [{ kind: "original", label: "元画像", image: file }];
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const longestSide = Math.max(bitmap.width, bitmap.height);
+    const scale = Math.min(
+      maxOcrImageSide / longestSide,
+      longestSide < minOcrImageSide ? minOcrImageSide / longestSide : 1
+    );
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    sourceCanvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
+    sourceContext.imageSmoothingEnabled = true;
+    sourceContext.imageSmoothingQuality = "high";
+    sourceContext.fillStyle = "#fff";
+    sourceContext.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+    sourceContext.drawImage(bitmap, 0, 0, sourceCanvas.width, sourceCanvas.height);
+    bitmap.close?.();
+    cleanDecorativeEdgeBands(sourceCanvas);
+
+    const enhancedCanvas = preprocessedOcrCanvas(sourceCanvas, "enhanced");
+    const binaryCanvas = preprocessedOcrCanvas(sourceCanvas, "binary");
+
+    return [
+      { kind: "enhanced", label: "補正", image: await canvasToOcrBlob(enhancedCanvas) },
+      { kind: "binary", label: "二値化", image: await canvasToOcrBlob(binaryCanvas) },
+      { kind: "original", label: "元画像", image: await canvasToOcrBlob(sourceCanvas) }
+    ];
+  } catch {
+    return [{ kind: "original", label: "元画像", image: file }];
+  }
+}
+
+function preprocessedOcrCanvas(sourceCanvas, mode) {
+  const canvas = document.createElement("canvas");
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(sourceCanvas, 0, 0);
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  const histogram = new Array(256).fill(0);
+
+  for (let index = 0; index < data.length; index += 4) {
+    const gray = compositedGray(data, index);
+    histogram[gray] += 1;
+  }
+
+  const threshold = Math.min(220, Math.max(140, otsuThreshold(histogram) + 10));
+  for (let index = 0; index < data.length; index += 4) {
+    const gray = compositedGray(data, index);
+    let value = gray;
+    if (mode === "binary") {
+      value = gray < threshold ? 0 : 255;
+    } else {
+      value = Math.round((gray - 32) * 1.45);
+      value = Math.min(255, Math.max(0, value));
+      if (value > 235) value = 255;
+      if (value < 70) value = 0;
+    }
+    data[index] = value;
+    data[index + 1] = value;
+    data[index + 2] = value;
+    data[index + 3] = 255;
+  }
+
+  context.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function cleanDecorativeEdgeBands(canvas) {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const { data } = imageData;
+  if (!looksLikeLightDocument(data, canvas.width, canvas.height)) return;
+
+  const edgeLimit = Math.max(1, Math.round(canvas.height * 0.12));
+  for (let y = 0; y < edgeLimit; y += 1) {
+    if (darkPixelRatio(data, canvas.width, y) > 0.55) paintRowWhite(data, canvas.width, y);
+  }
+  for (let y = canvas.height - edgeLimit; y < canvas.height; y += 1) {
+    if (darkPixelRatio(data, canvas.width, y) > 0.55) paintRowWhite(data, canvas.width, y);
+  }
+  context.putImageData(imageData, 0, 0);
+}
+
+function looksLikeLightDocument(data, width, height) {
+  const sampleSize = Math.min(width, height, Math.max(4, Math.round(Math.min(width, height) * 0.03)));
+  const corners = [
+    [0, 0],
+    [width - sampleSize, 0],
+    [0, height - sampleSize],
+    [width - sampleSize, height - sampleSize]
+  ];
+  return corners.filter(([x, y]) => averageGray(data, width, x, y, sampleSize, sampleSize) > 190).length >= 3;
+}
+
+function averageGray(data, width, startX, startY, sampleWidth, sampleHeight) {
+  let total = 0;
+  let count = 0;
+  for (let y = startY; y < startY + sampleHeight; y += 1) {
+    for (let x = startX; x < startX + sampleWidth; x += 1) {
+      total += compositedGray(data, (y * width + x) * 4);
+      count += 1;
+    }
+  }
+  return count ? total / count : 0;
+}
+
+function darkPixelRatio(data, width, y) {
+  let dark = 0;
+  for (let x = 0; x < width; x += 1) {
+    if (compositedGray(data, (y * width + x) * 4) < 80) dark += 1;
+  }
+  return dark / width;
+}
+
+function paintRowWhite(data, width, y) {
+  for (let x = 0; x < width; x += 1) {
+    const index = (y * width + x) * 4;
+    data[index] = 255;
+    data[index + 1] = 255;
+    data[index + 2] = 255;
+    data[index + 3] = 255;
+  }
+}
+
+function compositedGray(data, index) {
+  const alpha = data[index + 3] / 255;
+  const red = data[index] * alpha + 255 * (1 - alpha);
+  const green = data[index + 1] * alpha + 255 * (1 - alpha);
+  const blue = data[index + 2] * alpha + 255 * (1 - alpha);
+  return Math.round(red * 0.299 + green * 0.587 + blue * 0.114);
+}
+
+function otsuThreshold(histogram) {
+  const total = histogram.reduce((sum, count) => sum + count, 0);
+  let sum = 0;
+  for (let value = 0; value < histogram.length; value += 1) sum += value * histogram[value];
+
+  let backgroundWeight = 0;
+  let backgroundSum = 0;
+  let maxVariance = -1;
+  let threshold = 180;
+
+  for (let value = 0; value < histogram.length; value += 1) {
+    backgroundWeight += histogram[value];
+    if (backgroundWeight === 0) continue;
+    const foregroundWeight = total - backgroundWeight;
+    if (foregroundWeight === 0) break;
+    backgroundSum += value * histogram[value];
+    const backgroundMean = backgroundSum / backgroundWeight;
+    const foregroundMean = (sum - backgroundSum) / foregroundWeight;
+    const variance = backgroundWeight * foregroundWeight * (backgroundMean - foregroundMean) ** 2;
+    if (variance > maxVariance) {
+      maxVariance = variance;
+      threshold = value;
+    }
+  }
+
+  return threshold;
+}
+
+function canvasToOcrBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("画像の前処理に失敗しました。"))), "image/png");
+  });
+}
+
+function scoreOcrText(text, confidence) {
+  const compactText = text.replace(/\s/g, "");
+  const usefulCharacters = compactText.match(/[0-9A-Za-zぁ-んァ-ヶ一-龯々〆ヵヶー①-⑳]/gu)?.length || 0;
+  const lineCount = text.split("\n").filter((line) => line.trim()).length;
+  const brokenCharacters = text.match(/[�□■]/g)?.length || 0;
+  return (Number(confidence) || 0) * 2 + Math.min(usefulCharacters, 700) * 0.45 + Math.min(lineCount, 30) * 3 - brokenCharacters * 20;
+}
+
+function normalizeOcrText(text) {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim();
+}
+
+function insertOcrResult() {
+  if (state.ocrBusy || state.composing) return;
+  const text = ocrResultInput.value.trim();
+  const range = state.ocrInsertRange;
+  const page = currentPage();
+  if (!text || !range || !page || page.id !== range.pageId || !canEdit()) return;
+
+  const start = Math.min(range.start, range.end, memoInput.value.length);
+  const end = Math.min(Math.max(range.start, range.end), memoInput.value.length);
+  const prefix = start > 0 && !memoInput.value[start - 1].match(/\s/) ? "\n" : "";
+  const suffix = end < memoInput.value.length && !memoInput.value[end]?.match(/\s/) ? "\n" : "";
+  const insert = `${prefix}${text}${suffix}`;
+  const nextText = `${memoInput.value.slice(0, start)}${insert}${memoInput.value.slice(end)}`;
+  const caret = start + insert.length;
+
+  memoInput.value = nextText;
+  memoInput.setSelectionRange(caret, caret);
+  replacePageText(page, nextText);
+  memoInput.focus();
+  closeOcrDialog();
+}
+
 function movePageBy(pageId, direction) {
   if (!canEdit()) return;
 
@@ -863,6 +1305,7 @@ function canEdit() {
 function setEditingEnabled(enabled) {
   memoInput.readOnly = !enabled;
   addPageButton.disabled = !enabled;
+  ocrButton.disabled = !enabled || state.ocrBusy;
   importButton.disabled = !enabled;
   duplicatePageButton.disabled = !enabled;
   if (!enabled) {
@@ -887,6 +1330,7 @@ function updateActionButtons() {
   exportButton.disabled = !joined;
   saveButton.disabled = !joined;
   importButton.disabled = !canEdit();
+  ocrButton.disabled = !canEdit() || state.ocrBusy;
   restorePageButton.disabled = !canEdit() || state.deletedPageCount <= 0;
   restorePageButton.title =
     state.deletedPageCount > 0 ? `${state.deletedPageCount}件の削除済みページを復元できます` : "復元できるページはありません";
@@ -1119,10 +1563,13 @@ function leaveRoom() {
   state.composingPageId = "";
   state.compositionBaseText = "";
   state.deferredCompositionOps = [];
+  state.ocrBusy = false;
+  state.ocrInsertRange = null;
   state.pendingOps = new Map();
   entryError.textContent = "";
   memoView.classList.add("hidden");
   entryView.classList.remove("hidden");
+  closeOcrDialog();
   setStatus("offline");
 }
 

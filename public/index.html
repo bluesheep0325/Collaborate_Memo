@@ -63,11 +63,13 @@
               <div id="userList" class="user-list" aria-label="参加ユーザー"></div>
               <button id="duplicatePageButton" class="ghost-button" type="button">コピー</button>
               <button id="restorePageButton" class="ghost-button" type="button">復元</button>
+              <button id="ocrButton" class="ghost-button" type="button" title="画像から文字を読み取る">画像OCR</button>
               <button id="importButton" class="ghost-button" type="button" title="全ページJSONまたはTXTをインポート">インポート</button>
               <button id="exportButton" class="secondary-button" type="button">全ページ保存</button>
               <button id="saveButton" class="secondary-button" type="button">TXT保存</button>
               <button id="deletePageButton" class="danger-button" type="button">ページ削除</button>
               <input id="importFileInput" class="hidden" type="file" accept=".json,.txt,text/plain,application/json" />
+              <input id="ocrFileInput" class="hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" />
             </div>
           </header>
 
@@ -85,6 +87,21 @@
         </section>
       </section>
     </main>
+
+    <div id="ocrDialog" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="ocrDialogTitle">
+      <section class="modal-panel">
+        <header class="modal-head">
+          <h2 id="ocrDialogTitle">画像OCR</h2>
+          <button id="closeOcrButton" class="icon-button" type="button" aria-label="閉じる">×</button>
+        </header>
+        <p id="ocrStatusText" class="modal-status">画像からテキストを読み取っています</p>
+        <textarea id="ocrResultInput" class="ocr-result" aria-label="OCR結果"></textarea>
+        <footer class="modal-actions">
+          <button id="cancelOcrButton" class="ghost-button" type="button">キャンセル</button>
+          <button id="insertOcrButton" class="secondary-button" type="button">メモに挿入</button>
+        </footer>
+      </section>
+    </div>
 
     <script src="/app.js" type="module"></script>
   </body>
