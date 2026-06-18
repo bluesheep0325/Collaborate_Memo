@@ -38,6 +38,15 @@ try {
 
   const html = await fetch(baseUrl).then((response) => response.text());
   assert(html.includes("Collaborate Memo"), "index page should load");
+  assert(html.includes("ocrButton"), "OCR control should be present");
+
+  const ocrWorker = await fetch(`${baseUrl}/vendor/tesseract/worker.min.js`);
+  assert(ocrWorker.ok, "OCR worker asset should be served");
+  const ocrCore = await fetch(`${baseUrl}/vendor/tesseract-core/tesseract-core.wasm`);
+  assert(ocrCore.ok, "OCR wasm asset should be served");
+  assert((ocrCore.headers.get("content-type") || "").includes("application/wasm"), "OCR wasm should use wasm content type");
+  const ocrLanguage = await fetch(`${baseUrl}/vendor/tessdata/jpn.traineddata.gz`);
+  assert(ocrLanguage.ok, "OCR Japanese language data should be served");
 
   const rejected = await connectClient("smoke-room", "Mallory", "wrong");
   assert(rejected.error.reason === "invalid-password", "wrong password should be rejected");
