@@ -768,11 +768,12 @@ async function recognizeImageText(file) {
     setOcrStatus(text ? "認識結果を確認して挿入できます" : "テキストを検出できませんでした");
     showNotice(text ? "OCRが完了しました。" : "OCRでテキストを検出できませんでした。", text ? "online" : "error");
   } catch (error) {
+    const message = errorMessage(error);
     ocrResultInput.value = "";
     ocrResultInput.disabled = true;
     insertOcrButton.disabled = true;
-    setOcrStatus("OCRに失敗しました。画像を変えて試してください。");
-    showNotice(`OCRに失敗しました: ${errorMessage(error)}`, "error");
+    setOcrStatus(`OCRに失敗しました: ${message}`);
+    showNotice("OCRに失敗しました。", "error");
   } finally {
     state.ocrBusy = false;
     updateActionButtons();
@@ -811,16 +812,17 @@ function setOcrStatus(text) {
 async function ocrWorker() {
   if (state.ocrWorker) return state.ocrWorker;
   if (!state.ocrWorkerPromise) {
-    state.ocrWorkerPromise = import("/vendor/tesseract/tesseract.esm.min.js").then(async ({ createWorker }) => {
-      const worker = await createWorker(["jpn", "eng"], 1, {
+    state.ocrWorkerPromise = import("/vendor/tesseract/tesseract.esm.min.js").then(async (module) => {
+      const tesseract = module.createWorker ? module : module.default;
+      if (typeof tesseract?.createWorker !== "function") {
+        throw new Error("OCRライブラリを初期化できませんでした。");
+      }
+      const worker = await tesseract.createWorker(["jpn", "eng"], 1, {
         workerPath: "/vendor/tesseract/worker.min.js",
         corePath: "/vendor/tesseract-core",
         langPath: "/vendor/tessdata",
         cacheMethod: "none",
         workerBlobURL: false,
-        errorHandler: (error) => {
-          throw error;
-        },
         logger: (message) => {
           if (!state.ocrBusy || !message.status) return;
           const progress = Number.isFinite(message.progress) ? ` ${Math.round(message.progress * 100)}%` : "";
@@ -830,6 +832,10 @@ async function ocrWorker() {
       await worker.setParameters({ preserve_interword_spaces: "1" });
       state.ocrWorker = worker;
       return worker;
+    }).catch((error) => {
+      state.ocrWorker = null;
+      state.ocrWorkerPromise = null;
+      throw error;
     });
   }
   return state.ocrWorkerPromise;
