@@ -46,9 +46,20 @@ try {
 
   const ocrWorker = await fetch(`${baseUrl}/vendor/tesseract/worker.min.js`);
   assert(ocrWorker.ok, "OCR worker asset should be served");
-  const ocrCore = await fetch(`${baseUrl}/vendor/tesseract-core/tesseract-core.wasm`);
-  assert(ocrCore.ok, "OCR wasm asset should be served");
-  assert((ocrCore.headers.get("content-type") || "").includes("application/wasm"), "OCR wasm should use wasm content type");
+  const ocrCoreAssets = [
+    "/vendor/tesseract-core/tesseract-core.wasm",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd.wasm",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd.wasm.js",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd-lstm.wasm",
+    "/vendor/tesseract-core/tesseract-core-relaxedsimd-lstm.wasm.js"
+  ];
+  for (const assetPath of ocrCoreAssets) {
+    const response = await fetch(`${baseUrl}${assetPath}`);
+    assert(response.ok, `OCR core asset should be served: ${assetPath}`);
+    if (assetPath.endsWith(".wasm")) {
+      assert((response.headers.get("content-type") || "").includes("application/wasm"), `OCR wasm should use wasm content type: ${assetPath}`);
+    }
+  }
   const ocrLanguage = await fetch(`${baseUrl}/vendor/tessdata/jpn.traineddata.gz`);
   assert(ocrLanguage.ok, "OCR Japanese language data should be served");
 
