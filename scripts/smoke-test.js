@@ -36,9 +36,13 @@ try {
   assert(health.limits.maxPageChars >= 200000, "health endpoint should expose page character limit");
   assert(health.limits.maxFrameBytes > 128 * 1024, "websocket frame limit should allow large paste payloads");
 
-  const html = await fetch(baseUrl).then((response) => response.text());
+  const htmlResponse = await fetch(baseUrl);
+  const html = await htmlResponse.text();
   assert(html.includes("Collaborate Memo"), "index page should load");
   assert(html.includes("ocrButton"), "OCR control should be present");
+  const csp = htmlResponse.headers.get("content-security-policy") || "";
+  assert(csp.includes("worker-src 'self'"), "OCR worker should be allowed by CSP");
+  assert(csp.includes("'wasm-unsafe-eval'"), "OCR wasm should be allowed by CSP");
 
   const ocrWorker = await fetch(`${baseUrl}/vendor/tesseract/worker.min.js`);
   assert(ocrWorker.ok, "OCR worker asset should be served");

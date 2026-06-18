@@ -35,6 +35,7 @@ const closeOcrButton = document.querySelector("#closeOcrButton");
 const sessionKey = "collaborate-memo-session";
 const maxOcrImageBytes = 10 * 1024 * 1024;
 const maxOcrImageSide = 2200;
+const minOcrImageSide = 1800;
 
 const state = {
   socket: null,
@@ -771,11 +772,19 @@ async function recognizeImageText(file) {
     ocrResultInput.disabled = true;
     insertOcrButton.disabled = true;
     setOcrStatus("OCRに失敗しました。画像を変えて試してください。");
-    showNotice(`OCRに失敗しました: ${error.message}`, "error");
+    showNotice(`OCRに失敗しました: ${errorMessage(error)}`, "error");
   } finally {
     state.ocrBusy = false;
     updateActionButtons();
   }
+}
+
+function errorMessage(error) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string") return error;
+  if (error?.message) return String(error.message);
+  if (error?.type) return String(error.type);
+  return "原因不明のエラー";
 }
 
 function openOcrDialog(status, text) {
@@ -807,6 +816,11 @@ async function ocrWorker() {
         workerPath: "/vendor/tesseract/worker.min.js",
         corePath: "/vendor/tesseract-core",
         langPath: "/vendor/tessdata",
+        cacheMethod: "none",
+        workerBlobURL: false,
+        errorHandler: (error) => {
+          throw error;
+        },
         logger: (message) => {
           if (!state.ocrBusy || !message.status) return;
           const progress = Number.isFinite(message.progress) ? ` ${Math.round(message.progress * 100)}%` : "";
@@ -838,7 +852,11 @@ async function imageForOcr(file) {
 
   try {
     const bitmap = await createImageBitmap(file);
-    const scale = Math.min(1, maxOcrImageSide / Math.max(bitmap.width, bitmap.height));
+    const longestSide = Math.max(bitmap.width, bitmap.height);
+    const scale = Math.min(
+      maxOcrImageSide / longestSide,
+      longestSide < minOcrImageSide ? minOcrImageSide / longestSide : 1
+    );
     if (scale === 1 && file.size < 2 * 1024 * 1024) {
       bitmap.close?.();
       return file;
@@ -848,6 +866,8 @@ async function imageForOcr(file) {
     canvas.width = Math.max(1, Math.round(bitmap.width * scale));
     canvas.height = Math.max(1, Math.round(bitmap.height * scale));
     const context = canvas.getContext("2d");
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
     context.fillStyle = "#fff";
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
